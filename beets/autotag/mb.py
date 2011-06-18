@@ -1,5 +1,5 @@
 # This file is part of beets.
-# Copyright 2010, Adrian Sampson.
+# Copyright 2011, Adrian Sampson.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -33,6 +33,7 @@ SEARCH_LIMIT = 10
 VARIOUS_ARTISTS_ID = VARIOUS_ARTISTS_ID.rsplit('/', 1)[1]
 
 class ServerBusyError(Exception): pass
+class BadResponseError(Exception): pass
 
 log = logging.getLogger('beets')
 
@@ -54,6 +55,11 @@ RELEASE_TYPES = [
     Release.TYPE_REMIX,
     Release.TYPE_OTHER
 ]
+
+RELEASE_INCLUDES = mbws.ReleaseIncludes(artist=True, tracks=True,
+                                        releaseEvents=True, labels=True,
+                                        releaseGroup=True)
+TRACK_INCLUDES = mbws.TrackIncludes(artist=True)
 
 # MusicBrainz requires that a client does not query the server more
 # than once a second. This function enforces that limit using a
@@ -89,6 +95,13 @@ def _query_wrap(fun, *args, **kwargs):
                 else:
                     # This is not the error we're looking for.
                     raise
+            except mbws.ConnectionError:
+                # Typically a timeout.
+                pass
+            except mbws.ResponseError, exc:
+                # Malformed response from server.
+                log.error('Bad response from MusicBrainz: ' + str(exc))
+                raise BadResponseError()
             else:
                 # Success. Return the result.
                 return res
@@ -109,7 +122,10 @@ def get_releases(**params):
     
     # Issue query.
     filt = mbws.ReleaseFilter(**params)
-    results = _query_wrap(mbws.Query().getReleases, filter=filt)
+    try:
+        results = _query_wrap(mbws.Query().getReleases, filter=filt)
+    except BadResponseError:
+        results = ()
 
     # Construct results.
     for result in results:
@@ -122,8 +138,12 @@ def release_info(release_id):
     release and the release group ID. If the release is not found,
     returns None.
     """
-    inc = mbws.ReleaseIncludes(tracks=True, releaseGroup=True)
-    release = _query_wrap(mbws.Query().getReleaseById, release_id, inc)
+    try:
+        release = _query_wrap(mbws.Query().getReleaseById, release_id,
+                              RELEASE_INCLUDES)
+    except BadResponseError:
+        release = None
+
     if release:
         return release.getTracks(), release.getReleaseGroup().getId()
     else:
@@ -180,7 +200,10 @@ def find_tracks(criteria, limit=SEARCH_LIMIT):
         query = _lucene_query(criteria)
         log.debug('track query: %s' % query)
         filt = mbws.TrackFilter(limit=limit, query=query)
-        results = _query_wrap(mbws.Query().getTracks, filter=filt)
+        try:
+            results = _query_wrap(mbws.Query().getTracks, filter=filt)
+        except BadResponseError:
+            results = ()
         for result in results:
             track = result.track
             yield track_dict(track)
@@ -222,20 +245,28 @@ def release_dict(release, tracks=None):
             out['albumtype'] = releasetype.split('#')[1].lower()
             break
 
-    # Release date.
+    # Release date and label.
     try:
-        date_str = release.getEarliestReleaseDate()
+        event = release.getEarliestReleaseEvent()
     except:
         # The python-musicbrainz2 module has a bug that will raise an
         # exception when there is no release date to be found. In this
         # case, we just skip adding a release date to the dict.
         pass
     else:
-        if date_str:
-            date_parts = date_str.split('-')
-            for key in ('year', 'month', 'day'):
-                if date_parts:
-                    out[key] = int(date_parts.pop(0))
+        if event:
+            # Release date.
+            date_str = event.getDate()
+            if date_str:
+                date_parts = date_str.split('-')
+                for key in ('year', 'month', 'day'):
+                    if date_parts:
+                        out[key] = int(date_parts.pop(0))
+
+            # Label name.
+            label = event.getLabel()
+            if label:
+                out['label'] = label.getName()
 
     # Tracks.
     if tracks is not None:
@@ -278,9 +309,10 @@ def album_for_id(albumid):
     information dictionary. If no match is found, returns None.
     """
     query = mbws.Query()
-    inc = mbws.ReleaseIncludes(artist=True, tracks=True)
     try:
-        album = _query_wrap(query.getReleaseById, albumid, inc)
+        album = _query_wrap(query.getReleaseById, albumid, RELEASE_INCLUDES)
+    except BadResponseError:
+        return None
     except (mbws.ResourceNotFoundError, mbws.RequestError), exc:
         log.debug('Album ID match failed: ' + str(exc))
         return None
@@ -291,9 +323,10 @@ def track_for_id(trackid):
     dictionary or None if no track is found.
     """
     query = mbws.Query()
-    inc = mbws.TrackIncludes(artist=True)
     try:
-        track = _query_wrap(query.getTrackById, trackid, inc)
+        track = _query_wrap(query.getTrackById, trackid, TRACK_INCLUDES)
+    except BadResponseError:
+        return None
     except (mbws.ResourceNotFoundError, mbws.RequestError), exc:
         log.debug('Track ID match failed: ' + str(exc))
         return None

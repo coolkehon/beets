@@ -8,6 +8,8 @@
 * The importer now provides the option to specify a MusicBrainz ID
   manually if the built-in searching isn't working for a particular
   album or track.
+* $bitrate in path formats is now formatted as a human-readable kbps
+  value instead of a raw integer.
 * The import logger has been improved for "always-on" use. First,
   it is now possible to specify a log file in .beetsconfig. Also,
   logs are now appended rather than overwritten and contain
@@ -20,6 +22,9 @@
   more fairly by the autotagger. For example, if you're missing the
   acute accent on the "e" in "cafe", that change won't be penalized.
   This introduces a new dependency on the "unidecode" Python module.
+* The bitrate of lossless files is now calculated from their file size
+  (rather than being fixed at 0 or reflecting the uncompressed audio
+  bitrate).
 * Fixed a problem where duplicate albums or items imported at the same
   time would fail to be detected.
 * BPD now uses a persistent "virtual filesystem" in order to fake a
@@ -33,6 +38,12 @@
 * Fix crash when autotagging files with no metadata.
 * Fix a rare deadlock when finishing the import pipeline.
 * Fix an issue that was causing mpdupdate to run twice for every album.
+* Fix a bug that caused release dates/years not to be fetched.
+* Fix a crasher when setting MBIDs on MP3s file metadata.
+* Fix a "broken pipe" error when piping beets' standard output.
+* A better error message is given when the database file is unopenable.
+* Suppress errors due to timeouts and bad responses from MusicBrainz.
+* Fix a crash on album queries with item-only field names.
 
 1.0b8
 -----

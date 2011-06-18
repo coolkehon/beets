@@ -411,7 +411,7 @@ class CollectionQuery(Query):
         return out
 
     @classmethod
-    def from_string(cls, query_string, default_fields=None):
+    def from_string(cls, query_string, default_fields=None, all_keys=ITEM_KEYS):
         """Creates a query from a string in the format used by
         _parse_query. If default_fields are specified, they are the
         fields to be searched by unqualified search terms. Otherwise,
@@ -423,10 +423,12 @@ class CollectionQuery(Query):
                 subqueries.append(AnySubstringQuery(pattern, default_fields))
             elif key.lower() == 'comp': # a boolean field
                 subqueries.append(BooleanQuery(key.lower(), pattern))
-            elif key.lower() in ITEM_KEYS: # ignore unrecognized keys
+            elif key.lower() in all_keys: # ignore unrecognized keys
                 subqueries.append(SubstringQuery(key.lower(), pattern))
             elif key.lower() == 'singleton':
                 subqueries.append(SingletonQuery(util.str2bool(pattern)))
+            elif key.lower() == 'path':
+                subqueries.append(PathQuery(pattern))
         if not subqueries: # no terms in query
             subqueries = [TrueQuery()]
         return cls(subqueries)
@@ -485,6 +487,20 @@ class TrueQuery(Query):
     def match(self, item):
         return True
 
+class PathQuery(Query):
+    """A query that matches all items under a given path."""
+    def __init__(self, path):
+        self.file_path = normpath(path) # As a file.
+        self.dir_path = os.path.join(path, '') # As a directory (prefix).
+
+    def match(self, item):
+        return (item.path == self.file_path) or \
+               item.path.startswith(self.dir_path)
+
+    def clause(self):
+        dir_pat = self.dir_path + '%'
+        return '(path = ?) || (path LIKE ?)', (self.file_path, dir_pat)
+
 class ResultIterator(object):
     """An iterator into an item query result set."""
     
@@ -522,16 +538,22 @@ class BaseLibrary(object):
     # Helpers.
 
     @classmethod
-    def _get_query(cls, val=None, default_fields=None):
+    def _get_query(cls, val=None, album=False):
         """Takes a value which may be None, a query string, or a Query
-        object, and returns a suitable Query object. If default_fields
-        is specified, then it restricts the list of fields to search
-        for unqualified terms in query strings.
+        object, and returns a suitable Query object. album determines
+        whether the query is to match items or albums.
         """
+        if album:
+            default_fields = ALBUM_DEFAULT_FIELDS
+            all_keys = ALBUM_KEYS
+        else:
+            default_fields = ITEM_DEFAULT_FIELDS
+            all_keys = ITEM_KEYS
+
         if val is None:
             return TrueQuery()
         elif isinstance(val, basestring):
-            return AndQuery.from_string(val, default_fields)
+            return AndQuery.from_string(val, default_fields, all_keys)
         elif isinstance(val, Query):
             return val
         elif not isinstance(val, Query):
@@ -919,7 +941,7 @@ class Library(BaseLibrary):
     # Querying.
 
     def albums(self, query=None, artist=None):
-        query = self._get_query(query, ALBUM_DEFAULT_FIELDS)
+        query = self._get_query(query, True)
         if artist is not None:
             # "Add" the artist to the query.
             query = AndQuery((query, MatchQuery('albumartist', artist)))
@@ -931,7 +953,7 @@ class Library(BaseLibrary):
         return [Album(self, dict(res)) for res in c.fetchall()]
 
     def items(self, query=None, artist=None, album=None, title=None):
-        queries = [self._get_query(query, ITEM_DEFAULT_FIELDS)]
+        queries = [self._get_query(query, False)]
         if artist is not None:
             queries.append(MatchQuery('artist', artist))
         if album is not None:
