@@ -62,6 +62,7 @@ ITEM_FIELDS = [
     ('mb_artistid',      'text', True, True),
     ('mb_albumartistid', 'text', True, True),
     ('albumtype',        'text', True, True),
+    ('label',            'text', True, True),
 
     ('length',      'real', False, True),
     ('bitrate',     'int',  False, True),
@@ -90,6 +91,7 @@ ALBUM_FIELDS = [
     ('mb_albumid',       'text', True),
     ('mb_albumartistid', 'text', True),
     ('albumtype',        'text', True),
+    ('label',            'text', True),
 ]
 ALBUM_KEYS = [f[0] for f in ALBUM_FIELDS]
 ALBUM_KEYS_ITEM = [f[0] for f in ALBUM_FIELDS if f[2]]
@@ -379,56 +381,61 @@ class CollectionQuery(Query):
         clause = (' ' + joiner + ' ').join(clause_parts)
         return clause, subvals
     
-    # regular expression for _parse_query, below
-    _pq_regex = re.compile(r'(?:^|(?<=\s))' # zero-width match for whitespace
-                                            # or beginning of string
-       
-                           # non-grouping optional segment for the keyword
+    # regular expression for _parse_query_part, below
+    _pq_regex = re.compile(# non-grouping optional segment for the keyword
                            r'(?:'
                                 r'(\S+?)'   # the keyword
                                 r'(?<!\\):' # unescaped :
                            r')?'
-       
-                           r'(\S+)',        # the term itself
+                           r'(.+)',        # the term itself
                            re.I)            # case-insensitive
     @classmethod
-    def _parse_query(cls, query_string):
-        """Takes a query in the form of a whitespace-separated list of
-        search terms that may be preceded with a key followed by a
-        colon. Returns a list of pairs (key, term) where key is None if
-        the search term has no key.
+    def _parse_query_part(cls, part):
+        """Takes a query in the form of a key/value pair separated by a
+        colon. Returns pair (key, term) where key is None if the search
+        term has no key.
 
         For instance,
-        parse_query('stapler color:red') ==
-            [(None, 'stapler'), ('color', 'red')]
+        parse_query('stapler') == (None, 'stapler')
+        parse_query('color:red') == ('color', 'red')
 
         Colons may be 'escaped' with a backslash to disable the keying
         behavior.
         """
-        out = []
-        for match in cls._pq_regex.finditer(query_string):
-            out.append((match.group(1), match.group(2).replace(r'\:',':')))
-        return out
+        part = part.strip()
+        match = cls._pq_regex.match(part)
+        if match:
+            return match.group(1), match.group(2).replace(r'\:', ':')
 
     @classmethod
-    def from_string(cls, query_string, default_fields=None, all_keys=ITEM_KEYS):
-        """Creates a query from a string in the format used by
-        _parse_query. If default_fields are specified, they are the
+    def from_strings(cls, query_parts, default_fields=None, all_keys=ITEM_KEYS):
+        """Creates a query from a list of strings in the format used by
+        _parse_query_part. If default_fields are specified, they are the
         fields to be searched by unqualified search terms. Otherwise,
         all fields are searched for those terms.
         """
         subqueries = []
-        for key, pattern in cls._parse_query(query_string):
-            if key is None: # no key specified; match any field
-                subqueries.append(AnySubstringQuery(pattern, default_fields))
+        for part in query_parts:
+            res = cls._parse_query_part(part)
+            if not res:
+                continue
+            key, pattern = res
+            if key is None: # No key specified.
+                if os.sep in pattern:
+                    # This looks like a path.
+                    subqueries.append(PathQuery(pattern))
+                else:
+                    # Match any field.
+                    subqueries.append(AnySubstringQuery(pattern,
+                                                        default_fields))
             elif key.lower() == 'comp': # a boolean field
                 subqueries.append(BooleanQuery(key.lower(), pattern))
+            elif key.lower() == 'path':
+                subqueries.append(PathQuery(pattern))
             elif key.lower() in all_keys: # ignore unrecognized keys
                 subqueries.append(SubstringQuery(key.lower(), pattern))
             elif key.lower() == 'singleton':
                 subqueries.append(SingletonQuery(util.str2bool(pattern)))
-            elif key.lower() == 'path':
-                subqueries.append(PathQuery(pattern))
         if not subqueries: # no terms in query
             subqueries = [TrueQuery()]
         return cls(subqueries)
@@ -490,8 +497,10 @@ class TrueQuery(Query):
 class PathQuery(Query):
     """A query that matches all items under a given path."""
     def __init__(self, path):
-        self.file_path = normpath(path) # As a file.
-        self.dir_path = os.path.join(path, '') # As a directory (prefix).
+        # Match the path as a single file.
+        self.file_path = normpath(path)
+        # As a directory (prefix).
+        self.dir_path = os.path.join(self.file_path, '') 
 
     def match(self, item):
         return (item.path == self.file_path) or \
@@ -499,7 +508,8 @@ class PathQuery(Query):
 
     def clause(self):
         dir_pat = self.dir_path + '%'
-        return '(path = ?) || (path LIKE ?)', (self.file_path, dir_pat)
+        file_blob = buffer(bytestring_path(self.file_path))
+        return '(path = ?) || (path LIKE ?)', (file_blob, dir_pat)
 
 class ResultIterator(object):
     """An iterator into an item query result set."""
@@ -539,9 +549,10 @@ class BaseLibrary(object):
 
     @classmethod
     def _get_query(cls, val=None, album=False):
-        """Takes a value which may be None, a query string, or a Query
-        object, and returns a suitable Query object. album determines
-        whether the query is to match items or albums.
+        """Takes a value which may be None, a query string, a query
+        string list, or a Query object, and returns a suitable Query
+        object. album determines whether the query is to match items
+        or albums.
         """
         if album:
             default_fields = ALBUM_DEFAULT_FIELDS
@@ -550,10 +561,15 @@ class BaseLibrary(object):
             default_fields = ITEM_DEFAULT_FIELDS
             all_keys = ITEM_KEYS
 
+        # Convert a single string into a list of space-separated
+        # criteria.
+        if isinstance(val, basestring):
+            val = val.split()
+
         if val is None:
             return TrueQuery()
-        elif isinstance(val, basestring):
-            return AndQuery.from_string(val, default_fields, all_keys)
+        elif isinstance(val, list) or isinstance(val, tuple):
+            return AndQuery.from_strings(val, default_fields, all_keys)
         elif isinstance(val, Query):
             return val
         elif not isinstance(val, Query):
@@ -837,7 +853,7 @@ class Library(BaseLibrary):
         else:
             return normpath(os.path.join(self.directory, subpath))   
 
-    
+
     # Main interface.
 
     def add(self, item, copy=False):
@@ -1008,25 +1024,15 @@ class Library(BaseLibrary):
         if record:
             return Album(self, dict(record))
 
-    def add_album(self, items, infer_aa=False):
+    def add_album(self, items):
         """Create a new album in the database with metadata derived
         from its items. The items are added to the database if they
-        don't yet have an ID. Returns an Album object. If the
-        infer_aa flag is set, then the album artist field will be
-        guessed from artist fields when not present.
+        don't yet have an ID. Returns an Album object.
         """
         # Set the metadata from the first item.
         #fixme: check for consensus?
         item_values = dict(
             (key, getattr(items[0], key)) for key in ALBUM_KEYS_ITEM)
-        if infer_aa:
-            namemap = {
-                'albumartist': 'artist',
-                'mb_albumartistid': 'mb_artistid',
-            }
-            for field, itemfield in namemap.iteritems():
-                if not item_values[field]:
-                    item_values[field] = getattr(items[0], itemfield)
 
         sql = 'INSERT INTO albums (%s) VALUES (%s)' % \
               (', '.join(ALBUM_KEYS_ITEM),

@@ -1,5 +1,5 @@
 # This file is part of beets.
-# Copyright 2010, Adrian Sampson.
+# Copyright 2011, Adrian Sampson.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -17,8 +17,12 @@
 import urllib
 import sys
 import logging
+import os
 
 from beets.autotag.mb import album_for_id
+
+IMAGE_EXTENSIONS = ['png', 'jpg', 'jpeg']
+COVER_NAMES = ['cover', 'front', 'art', 'album', 'folder']
 
 # The common logger.
 log = logging.getLogger('beets')
@@ -47,12 +51,44 @@ def art_for_asin(asin):
             return fn
 
 
+# Art from the filesystem.
+
+def art_in_path(path):
+    """Look for album art files in a specified directory."""
+    if not os.path.isdir(path):
+        return
+
+    # Find all files that look like images in the directory.
+    images = []
+    for fn in os.listdir(path):
+        for ext in IMAGE_EXTENSIONS:
+            if fn.lower().endswith('.' + ext):
+                images.append(fn)
+
+    # Look for "preferred" filenames.
+    for fn in images:
+        for name in COVER_NAMES:
+            if fn.lower().startswith(name):
+                log.debug('Using well-named art file %s' % fn)
+                return os.path.join(path, fn)
+
+    # Fall back to any image in the folder.
+    if images:
+        log.debug('Using fallback art file %s' % images[0])
+        return os.path.join(path, images[0])
+
+
 # Main interface.
 
-def art_for_album(album):
+def art_for_album(album, path):
     """Given an album info dictionary from MusicBrainz, returns a path
     to downloaded art for the album (or None if no art is found).
     """
+    if isinstance(path, basestring):
+        out = art_in_path(path)
+        if out:
+            return out
+
     if album['asin']:
         log.debug('Fetching album art for ASIN %s.' % album['asin'])
         return art_for_asin(album['asin'])
@@ -69,7 +105,7 @@ if __name__ == '__main__':
     if not album:
         print 'album not found'
     else:
-        fn = art_for_album(album)
+        fn = art_for_album(album, None)
         if fn:
             print fn
             print len(open(fn).read())/1024

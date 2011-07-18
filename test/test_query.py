@@ -20,45 +20,35 @@ import os
 import _common
 import beets.library
 
-parse_query = beets.library.CollectionQuery._parse_query
+pqp = beets.library.CollectionQuery._parse_query_part
 
 some_item = _common.item()
 
 class QueryParseTest(unittest.TestCase):
     def test_one_basic_term(self):
         q = 'test'
-        r = [(None, 'test')]
-        self.assertEqual(parse_query(q), r)
-    
-    def test_three_basic_terms(self):
-        q = 'test one two'
-        r = [(None, 'test'), (None, 'one'), (None, 'two')]
-        self.assertEqual(parse_query(q), r)
+        r = (None, 'test')
+        self.assertEqual(pqp(q), r)
     
     def test_one_keyed_term(self):
         q = 'test:val'
-        r = [('test', 'val')]
-        self.assertEqual(parse_query(q), r)
-    
-    def test_one_keyed_one_basic(self):
-        q = 'test:val one'
-        r = [('test', 'val'), (None, 'one')]
-        self.assertEqual(parse_query(q), r)
-    
+        r = ('test', 'val')
+        self.assertEqual(pqp(q), r)
+
     def test_colon_at_end(self):
         q = 'test:'
-        r = [(None, 'test:')]
-        self.assertEqual(parse_query(q), r)
+        r = (None, 'test:')
+        self.assertEqual(pqp(q), r)
     
     def test_colon_at_start(self):
         q = ':test'
-        r = [(None, ':test')]
-        self.assertEqual(parse_query(q), r)
+        r = (None, ':test')
+        self.assertEqual(pqp(q), r)
     
     def test_escaped_colon(self):
         q = r'test\:val'
-        r = [((None), 'test:val')]
-        self.assertEqual(parse_query(q), r)
+        r = (None, 'test:val')
+        self.assertEqual(pqp(q), r)
 
 class AnySubstringQueryTest(unittest.TestCase):
     def setUp(self):
@@ -225,6 +215,16 @@ class MemoryGetTest(unittest.TestCase, AssertsMixin):
         names = [a.album for a in results]
         self.assertEqual(names, ['the album'])
 
+    def test_unicode_query(self):
+        self.single_item.title = u'caf\xe9'
+        self.lib.store(self.single_item)
+        self.lib.save()
+
+        q = u'title:caf\xe9'
+        results = self.lib.items(q)
+        self.assert_matched(results, u'caf\xe9')
+        self.assert_done(results)
+
 class PathQueryTest(unittest.TestCase, AssertsMixin):
     def setUp(self):
         self.lib = beets.library.Library(':memory:')
@@ -254,6 +254,33 @@ class PathQueryTest(unittest.TestCase, AssertsMixin):
 
     def test_no_match(self):
         q = 'path:/xyzzy/'
+        results = self.lib.items(q)
+        self.assert_done(results)
+    
+    def test_fragment_no_match(self):
+        q = 'path:/b/'
+        results = self.lib.items(q)
+        self.assert_done(results)
+
+    def test_nonnorm_path(self):
+        q = 'path:/x/../a/b'
+        results = self.lib.items(q)
+        self.assert_matched(results, 'path item')
+        self.assert_done(results)
+
+    def test_slashed_query_matches_path(self):
+        q = '/a/b'
+        results = self.lib.items(q)
+        self.assert_matched(results, 'path item')
+        self.assert_done(results)
+
+    def test_non_slashed_does_not_match_path(self):
+        q = 'c.mp3'
+        results = self.lib.items(q)
+        self.assert_done(results)
+
+    def test_slashes_in_explicit_field_does_not_match_path(self):
+        q = 'title:/a/b'
         results = self.lib.items(q)
         self.assert_done(results)
 

@@ -1,9 +1,27 @@
+# This file is part of beets.
+# Copyright 2011, Adrian Sampson.
+#
+# Permission is hereby granted, free of charge, to any person obtaining
+# a copy of this software and associated documentation files (the
+# "Software"), to deal in the Software without restriction, including
+# without limitation the rights to use, copy, modify, merge, publish,
+# distribute, sublicense, and/or sell copies of the Software, and to
+# permit persons to whom the Software is furnished to do so, subject to
+# the following conditions:
+#
+# The above copyright notice and this permission notice shall be
+# included in all copies or substantial portions of the Software.
+
+"""Allows beets to embed album art into file metadata."""
+from __future__ import with_statement
+
 import logging
 import imghdr
 
 from beets.plugins import BeetsPlugin
 from beets import mediafile
 from beets import ui
+from beets.ui import decargs
 from beets.util import syspath, normpath
 
 log = logging.getLogger('beets')
@@ -41,7 +59,7 @@ class EmbedCoverArtPlugin(BeetsPlugin):
             if not args:
                 raise ui.UserError('specify an image file')
             imagepath = normpath(args.pop(0))
-            embed(lib, imagepath, ui.make_query(args))
+            embed(lib, imagepath, decargs(args))
         embed_cmd.func = embed_func
 
         # Extract command.
@@ -51,14 +69,14 @@ class EmbedCoverArtPlugin(BeetsPlugin):
                                       help='image output file')
         def extract_func(lib, config, opts, args):
             outpath = normpath(opts.outpath or 'cover')
-            extract(lib, outpath, ui.make_query(args))
+            extract(lib, outpath, decargs(args))
         extract_cmd.func = extract_func
 
         # Clear command.
         clear_cmd = ui.Subcommand('clearart',
                                   help='remove images from file metadata')
         def clear_func(lib, config, opts, args):
-            clear(lib, ui.make_query(args))
+            clear(lib, decargs(args))
         clear_cmd.func = clear_func
 
         return [embed_cmd, extract_cmd, clear_cmd]

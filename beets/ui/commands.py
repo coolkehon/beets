@@ -22,7 +22,7 @@ import os
 import time
 
 from beets import ui
-from beets.ui import print_
+from beets.ui import print_, decargs
 from beets import autotag
 import beets.autotag.art
 from beets import plugins
@@ -118,6 +118,10 @@ def show_change(cur_artist, cur_album, items, info, dist, color=True):
             if cur_track != new_track:
                 cur_track = ui.colorize('red', cur_track)
                 new_track = ui.colorize('red', new_track)
+
+        # Show filename (non-colorized) when title is not set.
+        if not item.title.strip():
+            cur_title = os.path.basename(item.path)
         
         if cur_title != new_title and cur_track != new_track:
             print_(" * %s (%s) -> %s (%s)" % (
@@ -237,8 +241,24 @@ def choose_candidate(candidates, singleton, rec, color, timid,
                        (cur_artist, cur_album))
                 print_('Candidates:')
                 for i, (dist, items, info) in enumerate(candidates):
-                    print_('%i. %s - %s (%s)' % (i+1, info['artist'],
-                        info['album'], dist_string(dist, color)))
+                    line = '%i. %s - %s' % (i+1, info['artist'],
+                                            info['album'])
+
+                    # Label and year disambiguation, if available.
+                    label, year = None, None
+                    if 'label' in info:
+                        label = info['label']
+                    if 'year' in info and info['year']:
+                        year = unicode(info['year'])
+                    if label and year:
+                        line += u' [%s, %s]' % (label, year)
+                    elif label:
+                        line += u' [%s]' % label
+                    elif year:
+                        line += u' [%s]' % year
+
+                    line += ' (%s)' % dist_string(dist, color)
+                    print_(line)
                                             
             # Ask the user for a choice.
             if singleton:
@@ -602,7 +622,7 @@ list_cmd.parser.add_option('-a', '--album', action='store_true',
 list_cmd.parser.add_option('-p', '--path', action='store_true',
     help='print paths for matched items or albums')
 def list_func(lib, config, opts, args):
-    list_items(lib, ui.make_query(args), opts.album, opts.path)
+    list_items(lib, decargs(args), opts.album, opts.path)
 list_cmd.func = list_func
 default_commands.append(list_cmd)
 
@@ -657,7 +677,7 @@ remove_cmd.parser.add_option("-d", "--delete", action="store_true",
 remove_cmd.parser.add_option('-a', '--album', action='store_true',
     help='match albums instead of tracks')
 def remove_func(lib, config, opts, args):
-    remove_items(lib, ui.make_query(args), opts.album, opts.delete)
+    remove_items(lib, decargs(args), opts.album, opts.delete)
 remove_cmd.func = remove_func
 default_commands.append(remove_cmd)
 
@@ -698,7 +718,7 @@ Albums: %i""" % (
 stats_cmd = ui.Subcommand('stats',
     help='show statistics about the library or a query')
 def stats_func(lib, config, opts, args):
-    show_stats(lib, ui.make_query(args))
+    show_stats(lib, decargs(args))
 stats_cmd.func = stats_func
 default_commands.append(stats_cmd)
 

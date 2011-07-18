@@ -138,6 +138,21 @@ class NonAutotaggedImportTest(unittest.TestCase):
         paths = self._run_import(['sometrack'], singletons=True)
         self.assertTrue(os.path.exists(paths[0]))
 
+# Utilities for invoking the apply_choices coroutine.
+def _call_apply(coros, items, info):
+    task = importer.ImportTask(None, None, None)
+    task.is_album = True
+    task.set_choice((info, items))
+    if not isinstance(coros, list):
+        coros = [coros]
+    for coro in coros:
+        task = coro.send(task)
+def _call_apply_choice(coro, items, choice):
+    task = importer.ImportTask(None, None, items)
+    task.is_album = True
+    task.set_choice(choice)
+    coro.send(task)
+
 class ImportApplyTest(unittest.TestCase, _common.ExtraAsserts):
     def setUp(self):
         self.libdir = os.path.join(_common.RSRC, 'testlibdir')
@@ -169,28 +184,13 @@ class ImportApplyTest(unittest.TestCase, _common.ExtraAsserts):
     def tearDown(self):
         shutil.rmtree(self.libdir)
 
-    def _call_apply(self, coros, items, info):
-        task = importer.ImportTask(None, None, None)
-        task.is_album = True
-        task.set_choice((info, items))
-        if not isinstance(coros, list):
-            coros = [coros]
-        for coro in coros:
-            task = coro.send(task)
-
-    def _call_apply_choice(self, coro, items, choice):
-        task = importer.ImportTask(None, None, items)
-        task.is_album = True
-        task.set_choice(choice)
-        coro.send(task)
-
     def test_finalize_no_delete(self):
         config = _common.iconfig(self.lib, delete=False)
         applyc = importer.apply_choices(config)
         applyc.next()
         finalize = importer.finalize(config)
         finalize.next()
-        self._call_apply([applyc, finalize], [self.i], self.info)
+        _call_apply([applyc, finalize], [self.i], self.info)
         self.assertExists(self.srcpath)
 
     def test_finalize_with_delete(self):
@@ -199,13 +199,13 @@ class ImportApplyTest(unittest.TestCase, _common.ExtraAsserts):
         applyc.next()
         finalize = importer.finalize(config)
         finalize.next()
-        self._call_apply([applyc, finalize], [self.i], self.info)
+        _call_apply([applyc, finalize], [self.i], self.info)
         self.assertNotExists(self.srcpath)
 
     def test_apply_asis_uses_album_path(self):
         coro = importer.apply_choices(_common.iconfig(self.lib))
         coro.next() # Prime coroutine.
-        self._call_apply_choice(coro, [self.i], importer.action.ASIS)
+        _call_apply_choice(coro, [self.i], importer.action.ASIS)
         self.assertExists(
             os.path.join(self.libdir, self.lib.path_formats['default']+'.mp3')
         )
@@ -213,7 +213,7 @@ class ImportApplyTest(unittest.TestCase, _common.ExtraAsserts):
     def test_apply_match_uses_album_path(self):
         coro = importer.apply_choices(_common.iconfig(self.lib))
         coro.next() # Prime coroutine.
-        self._call_apply(coro, [self.i], self.info)
+        _call_apply(coro, [self.i], self.info)
         self.assertExists(
             os.path.join(self.libdir, self.lib.path_formats['default']+'.mp3')
         )
@@ -236,11 +236,142 @@ class ImportApplyTest(unittest.TestCase, _common.ExtraAsserts):
         coro.send(importer.ImportTask.done_sentinel('toppath'))
         # Just test no exception for now.
 
+class AsIsApplyTest(unittest.TestCase):
+    def setUp(self):
+        self.dbpath = os.path.join(_common.RSRC, 'templib.blb')
+        self.lib = library.Library(self.dbpath)
+        self.config = _common.iconfig(self.lib, write=False, copy=False)
+
+        # Make an "album" that has a homogenous artist. (Modified by
+        # individual tests.)
+        i1 = _common.item()
+        i2 = _common.item()
+        i3 = _common.item()
+        i1.title = 'first item'
+        i2.title = 'second item'
+        i3.title = 'third item'
+        i1.comp = i2.comp = i3.comp = False
+        i1.albumartist = i2.albumartist = i3.albumartist = ''
+        self.items = [i1, i2, i3]
+
+    def tearDown(self):
+        os.remove(self.dbpath)
+
+    def _apply_result(self):
+        """Run the "apply" coroutine and get the resulting Album."""
+        coro = importer.apply_choices(self.config)
+        coro.next()
+        _call_apply_choice(coro, self.items, importer.action.ASIS)
+
+        return self.lib.albums()[0]
+
+    def test_asis_homogenous_va_not_set(self):
+        alb = self._apply_result()
+        self.assertFalse(alb.comp)
+        self.assertEqual(alb.albumartist, self.items[2].artist)
+
+    def test_asis_heterogenous_va_set(self):
+        self.items[0].artist = 'another artist'
+        self.items[1].artist = 'some other artist'
+        alb = self._apply_result()
+        self.assertTrue(alb.comp)
+        self.assertEqual(alb.albumartist, 'Various Artists')
+
+    def test_asis_majority_artist_va_not_set(self):
+        self.items[0].artist = 'another artist'
+        alb = self._apply_result()
+        self.assertFalse(alb.comp)
+        self.assertEqual(alb.albumartist, self.items[2].artist)
+
+class InferAlbumDataTest(unittest.TestCase):
+    def setUp(self):
+        i1 = _common.item()
+        i2 = _common.item()
+        i3 = _common.item()
+        i1.title = 'first item'
+        i2.title = 'second item'
+        i3.title = 'third item'
+        i1.comp = i2.comp = i3.comp = False
+        i1.albumartist = i2.albumartist = i3.albumartist = ''
+        i1.mb_albumartistid = i2.mb_albumartistid = i3.mb_albumartistid = ''
+        self.items = [i1, i2, i3]
+
+        self.task = importer.ImportTask(path='a path', toppath='top path',
+                                        items=self.items)
+        self.task.set_null_match()
+
+    def _infer(self):
+        importer._infer_album_fields(self.task)
+
+    def test_asis_homogenous_single_artist(self):
+        self.task.set_choice(importer.action.ASIS)
+        self._infer()
+        self.assertFalse(self.items[0].comp)
+        self.assertEqual(self.items[0].albumartist, self.items[2].artist)
+
+    def test_asis_heterogenous_va(self):
+        self.items[0].artist = 'another artist'
+        self.items[1].artist = 'some other artist'
+        self.task.set_choice(importer.action.ASIS)
+
+        self._infer()
+
+        self.assertTrue(self.items[0].comp)
+        self.assertEqual(self.items[0].albumartist, 'Various Artists')
+
+    def test_asis_comp_applied_to_all_items(self):
+        self.items[0].artist = 'another artist'
+        self.items[1].artist = 'some other artist'
+        self.task.set_choice(importer.action.ASIS)
+
+        self._infer()
+
+        for item in self.items:
+            self.assertTrue(item.comp)
+            self.assertEqual(item.albumartist, 'Various Artists')
+
+    def test_asis_majority_artist_single_artist(self):
+        self.items[0].artist = 'another artist'
+        self.task.set_choice(importer.action.ASIS)
+
+        self._infer()
+
+        self.assertFalse(self.items[0].comp)
+        self.assertEqual(self.items[0].albumartist, self.items[2].artist)
+
+    def test_apply_gets_artist_and_id(self):
+        self.task.set_choice(({}, self.items)) # APPLY
+
+        self._infer()
+
+        self.assertEqual(self.items[0].albumartist, self.items[0].artist)
+        self.assertEqual(self.items[0].mb_albumartistid, self.items[0].mb_artistid)
+
+    def test_apply_lets_album_values_override(self):
+        for item in self.items:
+            item.albumartist = 'some album artist'
+            item.mb_albumartistid = 'some album artist id'
+        self.task.set_choice(({}, self.items)) # APPLY
+
+        self._infer()
+
+        self.assertEqual(self.items[0].albumartist,
+                         'some album artist')
+        self.assertEqual(self.items[0].mb_albumartistid,
+                         'some album artist id')
+
+    def test_small_single_artist_album(self):
+        self.items = [self.items[0]]
+        self.task.items = self.items
+        self.task.set_choice(importer.action.ASIS)
+        self._infer()
+        self.assertFalse(self.items[0].comp)
+
 class DuplicateCheckTest(unittest.TestCase):
     def setUp(self):
         self.lib = library.Library(':memory:')
         self.i = _common.item()
-        self.album = self.lib.add_album([self.i], True)
+        self.album = self.lib.add_album([self.i])
 
     def test_duplicate_album(self):
         res = importer._duplicate_check(self.lib, self.i.albumartist,

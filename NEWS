@@ -1,5 +1,35 @@
+1.0b10
+------
+* Fix a missing __future__ import in embedart on Python 2.5.
+
 1.0b9
 -----
+* Queries can now contain whitespace. Spaces passed as shell
+  arguments are now preserved, so you can use your shell's escaping
+  syntax to include spaces in queries. For example, typing this:
+    beet ls "the knife"
+  or this:
+    beet ls the\ knife
+  now matches the entire phrase. To match in specified fields, use
+  a construction like this:
+    beet ls "artist:the knife"
+* Queries can match items from the library by directory. A 'path:'
+  prefix is optional; any query containing a path separator (/ on
+  POSIX systems) is assumed to be a path query. Running
+  "beet ls path/to/music" will show all the music in your library
+  under the specified directory.
+* Album art is now automatically discovered and copied from the
+  imported directories when available.
+* When choosing the "as-is" import album (or doing a non-autotagged
+  import), every album either has an "album artist" set or is
+  marked as a compilation (Various Artists). The choice is made
+  based on the homogeneity of the tracks' artists. This prevents
+  compilations that are imported as-is from being scattered across
+  many directories after they are imported.
+* The release label for albums and tracks is now fetched from
+  MusicBrainz, written to files, and stored in the database.
+* Release year and label are now shown in the candidate selection
+  list to help disambiguate different releases of the same album.
 * Prompts in the importer interface are now colorized for easy
   reading. The default option is always highlighted.
 * The "list" command now accepts a "-p" switch that causes it to show
@@ -22,6 +52,8 @@
   more fairly by the autotagger. For example, if you're missing the
   acute accent on the "e" in "cafe", that change won't be penalized.
   This introduces a new dependency on the "unidecode" Python module.
+* When tagging a track with no title set, the track's filename is now
+  shown (instead of nothing at all).
 * The bitrate of lossless files is now calculated from their file size
   (rather than being fixed at 0 or reflecting the uncompressed audio
   bitrate).
@@ -34,6 +66,7 @@
   reuse by plugins (e.g., the FUSE plugin).
 * Singleton imports ("beet import -s") can now take individual files as
   arguments as well as directories.
+* Fix Unicode queries given on the command line.
 * Fix crasher in quiet singleton imports (import -qs).
 * Fix crash when autotagging files with no metadata.
 * Fix a rare deadlock when finishing the import pipeline.
@@ -64,7 +97,7 @@
   "embedart", implements this functionality. Enable the plugin to
   automatically embed downloaded album art into your music files'
   metadata. The plugin also provides the "embedart" and "extractart"
-  commands for moving image files in and out of metadata. See the
+  commands for moving image files in and247ca93696d3 out of metadata. See the
   wiki for more details. (Thanks, daenney!)
 * The "distance" number, which quantifies how different an album's
   current and proposed metadata are, is now displayed as "similarity"
