@@ -26,7 +26,7 @@ from _common import item, touch
 import beets.library
 from beets import util
 
-class MoveTest(unittest.TestCase):
+class MoveTest(unittest.TestCase, _common.ExtraAsserts):
     def setUp(self):
         # make a temporary file
         self.path = join(_common.RSRC, 'temp.mp3')
@@ -45,28 +45,46 @@ class MoveTest(unittest.TestCase):
         self.i.album = 'two'
         self.i.title = 'three'
         self.dest = join(self.libdir, 'one', 'two', 'three.mp3')
+
+        self.otherdir = join(_common.RSRC, 'testotherdir')
         
     def tearDown(self):
         if os.path.exists(self.path):
             os.remove(self.path)
         if os.path.exists(self.libdir):
             shutil.rmtree(self.libdir)
+        if os.path.exists(self.otherdir):
+            shutil.rmtree(self.otherdir)
     
     def test_move_arrives(self):
         self.i.move(self.lib)
-        self.assertTrue(os.path.exists(self.dest))
+        self.assertExists(self.dest)
+    
+    def test_move_to_custom_dir(self):
+        self.i.move(self.lib, basedir=self.otherdir)
+        self.assertExists(join(self.otherdir, 'one', 'two', 'three.mp3'))
     
     def test_move_departs(self):
         self.i.move(self.lib)
-        self.assertTrue(not os.path.exists(self.path))
+        self.assertNotExists(self.path)
+
+    def test_move_in_lib_prunes_empty_dir(self):
+        self.i.move(self.lib)
+        old_path = self.i.path
+        self.assertExists(old_path)
+
+        self.i.artist = 'newArtist'
+        self.i.move(self.lib)
+        self.assertNotExists(old_path)
+        self.assertNotExists(os.path.dirname(old_path))
     
     def test_copy_arrives(self):
         self.i.move(self.lib, copy=True)
-        self.assertTrue(os.path.exists(self.dest))
+        self.assertExists(self.dest)
     
     def test_copy_does_not_depart(self):
         self.i.move(self.lib, copy=True)
-        self.assertTrue(os.path.exists(self.path))
+        self.assertExists(self.path)
     
     def test_move_changes_path(self):
         self.i.move(self.lib)
@@ -138,9 +156,13 @@ class AlbumFileTest(unittest.TestCase):
         touch(self.i.path)
         # Make an album.
         self.ai = self.lib.add_album((self.i,))
+        # Alternate destination dir.
+        self.otherdir = os.path.join(_common.RSRC, 'testotherdir')
     def tearDown(self):
         if os.path.exists(self.libdir):
             shutil.rmtree(self.libdir)
+        if os.path.exists(self.otherdir):
+            shutil.rmtree(self.otherdir)
 
     def test_albuminfo_move_changes_paths(self):
         self.ai.album = 'newAlbumName'
@@ -167,7 +189,12 @@ class AlbumFileTest(unittest.TestCase):
         self.assertTrue(os.path.exists(oldpath))
         self.assertTrue(os.path.exists(self.i.path))
 
-class ArtFileTest(unittest.TestCase):
+    def test_albuminfo_move_to_custom_dir(self):
+        self.ai.move(basedir=self.otherdir)
+        self.lib.load(self.i)
+        self.assert_('testotherdir' in self.i.path)
+
+class ArtFileTest(unittest.TestCase, _common.ExtraAsserts):
     def setUp(self):
         # Make library and item.
         self.lib = beets.library.Library(':memory:')
@@ -184,9 +211,13 @@ class ArtFileTest(unittest.TestCase):
         self.art = self.lib.get_album(self.i).art_destination('something.jpg')
         touch(self.art)
         self.ai.artpath = self.art
+        # Alternate destination dir.
+        self.otherdir = os.path.join(_common.RSRC, 'testotherdir')
     def tearDown(self):
         if os.path.exists(self.libdir):
             shutil.rmtree(self.libdir)
+        if os.path.exists(self.otherdir):
+            shutil.rmtree(self.otherdir)
 
     def test_art_deleted_when_items_deleted(self):
         self.assertTrue(os.path.exists(self.art))
@@ -205,7 +236,20 @@ class ArtFileTest(unittest.TestCase):
         newart = self.lib.get_album(self.i).art_destination(self.art)
         self.assertTrue(os.path.exists(newart))
 
+    def test_art_moves_with_album_to_custom_dir(self):
+        # Move the album to another directory.
+        self.ai.move(basedir=self.otherdir)
+        self.lib.load(self.i)
+
+        # Art should be in new directory.
+        self.assertNotExists(self.art)
+        newart = self.lib.get_album(self.i).artpath
+        self.assertExists(newart)
+        self.assertTrue('testotherdir' in newart)
+
     def test_setart_copies_image(self):
+        os.remove(self.art)
+
         newart = os.path.join(self.libdir, 'newart.jpg')
         touch(newart)
         i2 = item()
@@ -218,7 +262,43 @@ class ArtFileTest(unittest.TestCase):
         ai.set_art(newart)
         self.assertTrue(os.path.exists(ai.artpath))
     
+    def test_setart_to_existing_art_works(self):
+        os.remove(self.art)
+
+        # Original art.
+        newart = os.path.join(self.libdir, 'newart.jpg')
+        touch(newart)
+        i2 = item()
+        i2.path = self.i.path
+        i2.artist = 'someArtist'
+        ai = self.lib.add_album((i2,))
+        i2.move(self.lib, True)
+        ai.set_art(newart)
+
+        # Set the art again.
+        ai.set_art(ai.artpath)
+        self.assertTrue(os.path.exists(ai.artpath))
+
+    def test_setart_to_existing_but_unset_art_works(self):
+        newart = os.path.join(self.libdir, 'newart.jpg')
+        touch(newart)
+        i2 = item()
+        i2.path = self.i.path
+        i2.artist = 'someArtist'
+        ai = self.lib.add_album((i2,))
+        i2.move(self.lib, True)
+
+        # Copy the art to the destination.
+        artdest = ai.art_destination(newart)
+        shutil.copy(newart, artdest)
+
+        # Set the art again.
+        ai.set_art(artdest)
+        self.assertTrue(os.path.exists(ai.artpath))
+
     def test_setart_sets_permissions(self):
+        os.remove(self.art)
+
         newart = os.path.join(self.libdir, 'newart.jpg')
         touch(newart)
         os.chmod(newart, 0400) # read-only
@@ -240,7 +320,7 @@ class ArtFileTest(unittest.TestCase):
             os.chmod(newart, 0777)
             os.chmod(ai.artpath, 0777)
 
-class RemoveTest(unittest.TestCase):
+class RemoveTest(unittest.TestCase, _common.ExtraAsserts):
     def setUp(self):
         # Make library and item.
         self.lib = beets.library.Library(':memory:')
@@ -257,32 +337,48 @@ class RemoveTest(unittest.TestCase):
         if os.path.exists(self.libdir):
             shutil.rmtree(self.libdir)
 
-    def test_removing_last_item_removes_empty_dir(self):
+    def test_removing_last_item_prunes_empty_dir(self):
         parent = os.path.dirname(self.i.path)
-        self.assertTrue(os.path.exists(parent))
+        self.assertExists(parent)
         self.lib.remove(self.i, True)
-        self.assertFalse(os.path.exists(parent))
+        self.assertNotExists(parent)
 
     def test_removing_last_item_preserves_nonempty_dir(self):
         parent = os.path.dirname(self.i.path)
         touch(os.path.join(parent, 'dummy.txt'))
         self.lib.remove(self.i, True)
-        self.assertTrue(os.path.exists(parent))
+        self.assertExists(parent)
+
+    def test_removing_last_item_prunes_dir_with_blacklisted_file(self):
+        parent = os.path.dirname(self.i.path)
+        touch(os.path.join(parent, '.DS_Store'))
+        self.lib.remove(self.i, True)
+        self.assertNotExists(parent)
 
     def test_removing_without_delete_leaves_file(self):
         path = self.i.path
         self.lib.remove(self.i)
-        self.assertTrue(os.path.exists(path))
+        self.assertExists(path)
 
     def test_removing_last_item_preserves_library_dir(self):
         self.lib.remove(self.i, True)
-        self.assertTrue(os.path.exists(self.libdir))
+        self.assertExists(self.libdir)
 
     def test_removing_item_outside_of_library_deletes_nothing(self):
         self.lib.directory = os.path.abspath(os.path.join(_common.RSRC, 'xxx'))
         parent = os.path.dirname(self.i.path)
         self.lib.remove(self.i, True)
-        self.assertTrue(os.path.exists(parent))
+        self.assertExists(parent)
+
+    def test_removing_last_item_in_album_with_albumart_prunes_dir(self):
+        artfile = os.path.join(_common.RSRC, 'testart.jpg')
+        touch(artfile)
+        self.ai.set_art(artfile)
+        os.remove(artfile)
+
+        parent = os.path.dirname(self.i.path)
+        self.lib.remove(self.i, True)
+        self.assertNotExists(parent)
 
 # Tests that we can "delete" nonexistent files.
 class SoftRemoveTest(unittest.TestCase, _common.ExtraAsserts):
@@ -302,6 +398,39 @@ class SoftRemoveTest(unittest.TestCase, _common.ExtraAsserts):
             util.soft_remove(self.path + 'XXX')
         except OSError:
             self.fail('OSError when removing path')
+
+class SafeMoveCopyTest(unittest.TestCase):
+    def setUp(self):
+        self.path = os.path.join(_common.RSRC, 'testfile')
+        touch(self.path)
+        self.otherpath = os.path.join(_common.RSRC, 'testfile2')
+        touch(self.otherpath)
+        self.dest = self.path + '.dest'
+    def tearDown(self):
+        if os.path.exists(self.path):
+            os.remove(self.path)
+        if os.path.exists(self.otherpath):
+            os.remove(self.otherpath)
+        if os.path.exists(self.dest):
+            os.remove(self.dest)
+
+    def test_existence_check(self):
+        with self.assertRaises(OSError):
+            util._assert_not_exists(self.path)
+
+    def test_successful_move(self):
+        util.move(self.path, self.dest)
+
+    def test_successful_copy(self):
+        util.copy(self.path, self.dest)
+
+    def test_unsuccessful_move(self):
+        with self.assertRaises(OSError):
+            util.move(self.path, self.otherpath)
+
+    def test_unsuccessful_copy(self):
+        with self.assertRaises(OSError):
+            util.copy(self.path, self.otherpath)
 
 def suite():
     return unittest.TestLoader().loadTestsFromName(__name__)

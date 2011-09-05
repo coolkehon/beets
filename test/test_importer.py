@@ -100,6 +100,8 @@ class NonAutotaggedImportTest(unittest.TestCase):
                 singletons = singletons,
                 choose_item_func = None,
                 timid = False,
+                query = None,
+                incremental = False,
         )
 
         return paths
@@ -147,9 +149,11 @@ def _call_apply(coros, items, info):
         coros = [coros]
     for coro in coros:
         task = coro.send(task)
-def _call_apply_choice(coro, items, choice):
+def _call_apply_choice(coro, items, choice, album=True):
     task = importer.ImportTask(None, None, items)
-    task.is_album = True
+    task.is_album = album
+    if not album:
+        task.item = items[0]
     task.set_choice(choice)
     coro.send(task)
 
@@ -283,6 +287,173 @@ class AsIsApplyTest(unittest.TestCase):
         self.assertFalse(alb.comp)
         self.assertEqual(alb.albumartist, self.items[2].artist)
 
+class ApplyExistingItemsTest(unittest.TestCase, _common.ExtraAsserts):
+    def setUp(self):
+        self.libdir = os.path.join(_common.RSRC, 'testlibdir')
+        os.mkdir(self.libdir)
+
+        self.dbpath = os.path.join(_common.RSRC, 'templib.blb')
+        self.lib = library.Library(self.dbpath, self.libdir)
+        self.lib.path_formats = {
+            'default': '$artist/$title',
+        }
+        self.config = _common.iconfig(self.lib, write=False, copy=False)
+
+        self.srcpath = os.path.join(self.libdir, 'srcfile.mp3')
+        shutil.copy(os.path.join(_common.RSRC, 'full.mp3'), self.srcpath)
+        self.i = library.Item.from_path(self.srcpath)
+        self.i.comp = False
+
+    def tearDown(self):
+        os.remove(self.dbpath)
+        shutil.rmtree(self.libdir)
+
+    def _apply_asis(self, items, album=True):
+        """Run the "apply" coroutine."""
+        coro = importer.apply_choices(self.config)
+        coro.next()
+        _call_apply_choice(coro, items, importer.action.ASIS, album)
+
+    def test_apply_existing_album_does_not_duplicate_item(self):
+        # First, import an item to add it to the library.
+        self._apply_asis([self.i])
+
+        # Get the item's path and import it again.
+        item = self.lib.items().next()
+        new_item = library.Item.from_path(item.path)
+        self._apply_asis([new_item])
+
+        # Should not be duplicated.
+        self.assertEqual(len(list(self.lib.items())), 1)
+
+    def test_apply_existing_album_does_not_duplicate_album(self):
+        # As above.
+        self._apply_asis([self.i])
+        item = self.lib.items().next()
+        new_item = library.Item.from_path(item.path)
+        self._apply_asis([new_item])
+
+        # Should not be duplicated.
+        self.assertEqual(len(list(self.lib.albums())), 1)
+
+    def test_apply_existing_singleton_does_not_duplicate_album(self):
+        self._apply_asis([self.i])
+        item = self.lib.items().next()
+        new_item = library.Item.from_path(item.path)
+        self._apply_asis([new_item], False)
+
+        # Should not be duplicated.
+        self.assertEqual(len(list(self.lib.items())), 1)
+
+    def test_apply_existing_item_new_metadata_does_not_duplicate(self):
+        # We want to copy the item to a new location.
+        self.config.copy = True
+
+        # Import with existing metadata.
+        self._apply_asis([self.i])
+
+        # Import again with new metadata.
+        item = self.lib.items().next()
+        new_item = library.Item.from_path(item.path)
+        new_item.title = 'differentTitle'
+        self._apply_asis([new_item])
+
+        # Should not be duplicated.
+        self.assertEqual(len(list(self.lib.items())), 1)
+        self.assertEqual(len(list(self.lib.albums())), 1)
+
+    def test_apply_existing_item_new_metadata_moves_files(self):
+        # As above, import with old metadata and then reimport with new.
+        self.config.copy = True
+        self._apply_asis([self.i])
+        item = self.lib.items().next()
+        new_item = library.Item.from_path(item.path)
+        new_item.title = 'differentTitle'
+        self._apply_asis([new_item])
+
+        item = self.lib.items().next()
+        self.assertTrue('differentTitle' in item.path)
+        self.assertExists(item.path)
+
+    def test_apply_existing_item_new_metadata_copy_disabled(self):
+        # Import *without* copying to ensure that the path does *not* change.
+        self.config.copy = False
+        self._apply_asis([self.i])
+        item = self.lib.items().next()
+        new_item = library.Item.from_path(item.path)
+        new_item.title = 'differentTitle'
+        self._apply_asis([new_item])
+
+        item = self.lib.items().next()
+        self.assertFalse('differentTitle' in item.path)
+        self.assertExists(item.path)
+
+    def test_apply_existing_item_new_metadata_removes_old_files(self):
+        self.config.copy = True
+        self._apply_asis([self.i])
+        item = self.lib.items().next()
+        oldpath = item.path
+        new_item = library.Item.from_path(item.path)
+        new_item.title = 'differentTitle'
+        self._apply_asis([new_item])
+
+        item = self.lib.items().next()
+        self.assertNotExists(oldpath)
+
+    def test_apply_existing_item_new_metadata_delete_enabled(self):
+        # The "delete" flag should be ignored -- only the "copy" flag
+        # controls whether files move.
+        self.config.copy = True
+        self.config.delete = True # !
+        self._apply_asis([self.i])
+        item = self.lib.items().next()
+        oldpath = item.path
+        new_item = library.Item.from_path(item.path)
+        new_item.title = 'differentTitle'
+        self._apply_asis([new_item])
+
+        item = self.lib.items().next()
+        self.assertNotExists(oldpath)
+        self.assertTrue('differentTitle' in item.path)
+        self.assertExists(item.path)
+
+    def test_apply_existing_item_preserves_file(self):
+        # With copying enabled, import the item twice with same metadata.
+        self.config.copy = True
+        self._apply_asis([self.i])
+        item = self.lib.items().next()
+        oldpath = item.path
+        new_item = library.Item.from_path(item.path)
+        self._apply_asis([new_item])
+
+        self.assertEqual(len(list(self.lib.items())), 1)
+        item = self.lib.items().next()
+        self.assertEqual(oldpath, item.path)
+        self.assertExists(oldpath)
+
+    def test_apply_existing_item_preserves_file_delete_enabled(self):
+        self.config.copy = True
+        self.config.delete = True # !
+        self._apply_asis([self.i])
+        item = self.lib.items().next()
+        new_item = library.Item.from_path(item.path)
+        self._apply_asis([new_item])
+
+        self.assertEqual(len(list(self.lib.items())), 1)
+        item = self.lib.items().next()
+        self.assertExists(item.path)
+
+    def test_same_album_does_not_duplicate(self):
+        # With the -L flag, exactly the same item (with the same ID)
+        # is re-imported. This test simulates that situation.
+        self._apply_asis([self.i])
+        item = self.lib.items().next()
+        self._apply_asis([item])
+
+        # Should not be duplicated.
+        self.assertEqual(len(list(self.lib.items())), 1)
+        self.assertEqual(len(list(self.lib.albums())), 1)
+
 class InferAlbumDataTest(unittest.TestCase):
     def setUp(self):
         i1 = _common.item()
@@ -345,7 +516,8 @@ class InferAlbumDataTest(unittest.TestCase):
         self._infer()
 
         self.assertEqual(self.items[0].albumartist, self.items[0].artist)
-        self.assertEqual(self.items[0].mb_albumartistid, self.items[0].mb_artistid)
+        self.assertEqual(self.items[0].mb_albumartistid,
+                         self.items[0].mb_artistid)
 
     def test_apply_lets_album_values_override(self):
         for item in self.items:
@@ -373,41 +545,113 @@ class DuplicateCheckTest(unittest.TestCase):
         self.i = _common.item()
         self.album = self.lib.add_album([self.i])
 
-    def test_duplicate_album(self):
-        res = importer._duplicate_check(self.lib, self.i.albumartist,
-                                        self.i.album)
+    def _album_task(self, asis, artist=None, album=None, existing=False):
+        if existing:
+            item = self.i
+        else:
+            item = _common.item()
+        artist = artist or item.albumartist
+        album = album or item.album
+
+        task = importer.ImportTask(path='a path', toppath='top path',
+                                   items=[item])
+        task.set_match(artist, album, None, None)
+        if asis:
+            task.set_choice(importer.action.ASIS)
+        else:
+            task.set_choice(({'artist': artist, 'album': album}, [item]))
+        return task
+
+    def _item_task(self, asis, artist=None, title=None, existing=False):
+        if existing:
+            item = self.i
+        else:
+            item = _common.item()
+        artist = artist or item.artist
+        title = title or item.title
+
+        task = importer.ImportTask.item_task(item)
+        if asis:
+            item.artist = artist
+            item.title = title
+            task.set_choice(importer.action.ASIS)
+        else:
+            task.set_choice({'artist': artist, 'title': title})
+        return task
+
+    def test_duplicate_album_apply(self):
+        res = importer._duplicate_check(self.lib, self._album_task(False))
         self.assertTrue(res)
 
-    def test_different_album(self):
-        res = importer._duplicate_check(self.lib, 'xxx', 'yyy')
+    def test_different_album_apply(self):
+        res = importer._duplicate_check(self.lib,
+                                        self._album_task(False, 'xxx', 'yyy'))
+        self.assertFalse(res)
+
+    def test_duplicate_album_asis(self):
+        res = importer._duplicate_check(self.lib, self._album_task(True))
+        self.assertTrue(res)
+
+    def test_different_album_asis(self):
+        res = importer._duplicate_check(self.lib,
+                                        self._album_task(True, 'xxx', 'yyy'))
         self.assertFalse(res)
 
     def test_duplicate_va_album(self):
         self.album.albumartist = 'an album artist'
-        res = importer._duplicate_check(self.lib, 'an album artist',
-                                        self.i.album)
+        res = importer._duplicate_check(self.lib,
+                    self._album_task(False, 'an album artist'))
         self.assertTrue(res)
 
-    def test_duplicate_item(self):
-        res = importer._item_duplicate_check(self.lib, self.i.artist,
-                                             self.i.title)
+    def test_duplicate_item_apply(self):
+        res = importer._item_duplicate_check(self.lib, 
+                                             self._item_task(False))
         self.assertTrue(res)
 
-    def test_different_item(self):
-        res = importer._item_duplicate_check(self.lib, 'xxx', 'yyy')
+    def test_different_item_apply(self):
+        res = importer._item_duplicate_check(self.lib, 
+                                    self._item_task(False, 'xxx', 'yyy'))
+        self.assertFalse(res)
+
+    def test_duplicate_item_asis(self):
+        res = importer._item_duplicate_check(self.lib, 
+                                             self._item_task(True))
+        self.assertTrue(res)
+
+    def test_different_item_asis(self):
+        res = importer._item_duplicate_check(self.lib, 
+                                    self._item_task(True, 'xxx', 'yyy'))
         self.assertFalse(res)
 
     def test_recent_item(self):
         recent = set()
-        importer._item_duplicate_check(self.lib, 'xxx', 'yyy', recent)
-        res = importer._item_duplicate_check(self.lib, 'xxx', 'yyy', recent)
+        importer._item_duplicate_check(self.lib, 
+                                       self._item_task(False, 'xxx', 'yyy'), 
+                                       recent)
+        res = importer._item_duplicate_check(self.lib, 
+                                       self._item_task(False, 'xxx', 'yyy'), 
+                                       recent)
         self.assertTrue(res)
 
     def test_recent_album(self):
         recent = set()
-        importer._duplicate_check(self.lib, 'xxx', 'yyy', recent)
-        res = importer._duplicate_check(self.lib, 'xxx', 'yyy', recent)
+        importer._duplicate_check(self.lib, 
+                                  self._album_task(False, 'xxx', 'yyy'), 
+                                  recent)
+        res = importer._duplicate_check(self.lib, 
+                                  self._album_task(False, 'xxx', 'yyy'), 
+                                  recent)
         self.assertTrue(res)
+
+    def test_duplicate_album_existing(self):
+        res = importer._duplicate_check(self.lib,
+                                        self._album_task(False, existing=True))
+        self.assertFalse(res)
+
+    def test_duplicate_item_existing(self):
+        res = importer._item_duplicate_check(self.lib, 
+                                        self._item_task(False, existing=True))
+        self.assertFalse(res)
 
 def suite():
     return unittest.TestLoader().loadTestsFromName(__name__)

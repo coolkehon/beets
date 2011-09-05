@@ -19,6 +19,7 @@ from __future__ import with_statement # Python 2.5
 import os
 import logging
 import pickle
+from collections import defaultdict
 
 from beets import autotag
 from beets import library
@@ -80,12 +81,21 @@ def _reopen_lib(lib):
     else:
         return lib
 
-def _duplicate_check(lib, artist, album, recent=None):
+def _duplicate_check(lib, task, recent=None):
     """Check whether an album already exists in the library. `recent`
     should be a set of (artist, album) pairs that will be built up
     with every call to this function and checked along with the
     library.
     """
+    if task.choice_flag is action.ASIS:
+        artist = task.cur_artist
+        album = task.cur_album
+    elif task.choice_flag is action.APPLY:
+        artist = task.info['artist']
+        album = task.info['album']
+    else:
+        return False
+
     if artist is None:
         # As-is import with no artist. Skip check.
         return False
@@ -97,14 +107,29 @@ def _duplicate_check(lib, artist, album, recent=None):
         recent.add((artist, album))
 
     # Look in the library.
+    cur_paths = set(i.path for i in task.items)
     for album_cand in lib.albums(artist=artist):
         if album_cand.album == album:
+            # Check whether the album is identical in contents, in which
+            # case it is not a duplicate (will be replaced).
+            other_paths = set(i.path for i in album_cand.items())
+            if other_paths == cur_paths:
+                continue
             return True
 
     return False
 
-def _item_duplicate_check(lib, artist, title, recent=None):
+def _item_duplicate_check(lib, task, recent=None):
     """Check whether an item already exists in the library."""
+    if task.choice_flag is action.ASIS:
+        artist = task.item.artist
+        title = task.item.title
+    elif task.choice_flag is action.APPLY:
+        artist = task.info['artist']
+        title = task.info['title']
+    else:
+        return False
+
     # Try recent items.
     if recent is not None:
         if (artist, title) in recent:
@@ -114,13 +139,14 @@ def _item_duplicate_check(lib, artist, title, recent=None):
     # Check the library.
     item_iter = lib.items(artist=artist, title=title)
     try:
-        item_iter.next()
-    except StopIteration:
-        return False
+        for other_item in item_iter:
+            # Existing items not considered duplicates.
+            if other_item.path == task.item.path:
+                continue
+            return True
     finally:
         item_iter.close()
-
-    return True
+    return False
 
 def _infer_album_fields(task):
     """Given an album and an associated import task, massage the
@@ -161,6 +187,18 @@ def _infer_album_fields(task):
         for k, v in changes.iteritems():
             setattr(item, k, v)
 
+def _open_state():
+    """Reads the state file, returning a dictionary."""
+    try:
+        with open(STATE_FILE) as f:
+            return pickle.load(f)
+    except IOError:
+        return {}
+def _save_state(state):
+    """Writes the state dictionary out to disk."""
+    with open(STATE_FILE, 'w') as f:
+        pickle.dump(state, f)
+
 
 # Utilities for reading and writing the beets progress file, which
 # allows long tagging tasks to be resumed when they pause (or crash).
@@ -170,11 +208,9 @@ def progress_set(toppath, path):
     `path`. If path is None, then clear the progress value (indicating
     that the tagging completed).
     """
-    try:
-        with open(STATE_FILE) as f:
-            state = pickle.load(f)
-    except IOError:
-        state = {PROGRESS_KEY: {}}
+    state = _open_state()
+    if PROGRESS_KEY not in state:
+        state[PROGRESS_KEY] = {}
 
     if path is None:
         # Remove progress from file.
@@ -183,18 +219,39 @@ def progress_set(toppath, path):
     else:
         state[PROGRESS_KEY][toppath] = path
 
-    with open(STATE_FILE, 'w') as f:
-        pickle.dump(state, f)
+    _save_state(state)
 def progress_get(toppath):
     """Get the last successfully tagged subpath of toppath. If toppath
     has no progress information, returns None.
     """
-    try:
-        with open(STATE_FILE) as f:
-            state = pickle.load(f)
-    except IOError:
+    state = _open_state()
+    if PROGRESS_KEY not in state:
         return None
     return state[PROGRESS_KEY].get(toppath)
+
+
+# Similarly, utilities for manipulating the "incremental" import log.
+# This keeps track of all directories that were ever imported, which
+# allows the importer to only import new stuff.
+HISTORY_KEY = 'taghistory'
+def history_add(path):
+    """Indicate that the import of `path` is completed and should not
+    be repeated in incremental imports.
+    """
+    state = _open_state()
+    if HISTORY_KEY not in state:
+        state[HISTORY_KEY] = set()
+
+    state[HISTORY_KEY].add(path)
+
+    _save_state(state)
+def history_get():
+    """Get the set of completed paths in incremental imports.
+    """
+    state = _open_state()
+    if HISTORY_KEY not in state:
+        return set()
+    return state[HISTORY_KEY]
 
 
 # The configuration structure.
@@ -207,7 +264,8 @@ class ImportConfig(object):
     _fields = ['lib', 'paths', 'resume', 'logfile', 'color', 'quiet',
                'quiet_fallback', 'copy', 'write', 'art', 'delete',
                'choose_match_func', 'should_resume_func', 'threaded',
-               'autot', 'singletons', 'timid', 'choose_item_func']
+               'autot', 'singletons', 'timid', 'choose_item_func',
+               'query', 'incremental']
     def __init__(self, **kwargs):
         for slot in self._fields:
             setattr(self, slot, kwargs[slot])
@@ -215,6 +273,17 @@ class ImportConfig(object):
         # Normalize the paths.
         if self.paths:
             self.paths = map(normpath, self.paths)
+
+        # Incremental and progress are mutually exclusive.
+        if self.incremental:
+            self.resume = False
+
+        # When based on a query instead of directories, never
+        # save progress or try to resume.
+        if self.query is not None:
+            self.paths = None
+            self.resume = False
+            self.incremental = False
 
 
 # The importer task class.
@@ -319,6 +388,12 @@ class ImportTask(object):
             # album task, which implies the same.
             progress_set(self.toppath, self.path)
 
+    def save_history(self):
+        """Save the directory in the history for incremental imports.
+        """
+        if self.sentinel or self.is_album:
+            history_add(self.path)
+
     # Logical decisions.
     def should_write_tags(self):
         """Should new info be written to the files' metadata?"""
@@ -365,6 +440,10 @@ def read_tasks(config):
                 else:
                     # Clear progress; we're starting from the top.
                     progress_set(path, None)
+
+    # Look for saved incremental directories.
+    if config.incremental:
+        history_dirs = history_get()
     
     for toppath in config.paths:
         # Check whether the path is to a file.
@@ -377,12 +456,17 @@ def read_tasks(config):
         if progress:
             resume_dir = resume_dirs.get(toppath)
         for path, items in autotag.albums_in_dir(toppath):
+            # Skip according to progress.
             if progress and resume_dir:
                 # We're fast-forwarding to resume a previous tagging.
                 if path == resume_dir:
                     # We've hit the last good path! Turn off the
                     # fast-forwarding.
                     resume_dir = None
+                continue
+
+            # When incremental, skip paths in the history.
+            if config.incremental and path in history_dirs:
                 continue
 
             # Yield all the necessary tasks.
@@ -395,6 +479,28 @@ def read_tasks(config):
 
         # Indicate the directory is finished.
         yield ImportTask.done_sentinel(toppath)
+
+def query_tasks(config):
+    """A generator that works as a drop-in-replacement for read_tasks.
+    Instead of finding files from the filesystem, a query is used to
+    match items from the library.
+    """
+    lib = _reopen_lib(config.lib)
+
+    if config.singletons:
+        # Search for items.
+        items = list(lib.items(config.query))
+        for item in items:
+            yield ImportTask.item_task(item)
+
+    else:
+        # Search for albums.
+        albums = lib.albums(config.query)
+        for album in albums:
+            log.debug('yielding album %i: %s - %s' %
+                      (album.id, album.albumartist, album.album))
+            items = list(album.items())
+            yield ImportTask(None, album.item_dir(), items)
 
 def initial_lookup(config):
     """A coroutine for performing the initial MusicBrainz lookup for an
@@ -451,17 +557,10 @@ def user_query(config):
             task = pipeline.multiple(item_tasks)
 
         # Check for duplicates if we have a match (or ASIS).
-        if choice is action.ASIS or isinstance(choice, tuple):
-            if choice is action.ASIS:
-                artist = task.cur_artist
-                album = task.cur_album
-            else:
-                artist = task.info['artist']
-                album = task.info['album']
-            if _duplicate_check(lib, artist, album, recent):
-                tag_log(config.logfile, 'duplicate', task.path)
-                log.warn("This album is already in the library!")
-                task.set_choice(action.SKIP)
+        if _duplicate_check(lib, task, recent):
+            tag_log(config.logfile, 'duplicate', task.path)
+            log.warn("This album is already in the library!")
+            task.set_choice(action.SKIP)
 
 def show_progress(config):
     """This stage replaces the initial_lookup and user_query stages
@@ -491,6 +590,12 @@ def apply_choices(config):
         if task.should_skip():
             continue
 
+        items = task.items if task.is_album else [task.item]
+        # Clear IDs in case the items are being re-tagged.
+        for item in items:
+            item.id = None
+            item.album_id = None
+
         # Change metadata.
         if task.should_write_tags():
             if task.is_album:
@@ -502,20 +607,40 @@ def apply_choices(config):
         if task.is_album:
             _infer_album_fields(task)
 
+        # Find existing item entries that these are replacing. Old
+        # album structures are automatically cleaned up when the
+        # last item is removed.
+        replaced_items = defaultdict(list)
+        for item in items:
+            dup_items = list(lib.items(
+                            library.MatchQuery('path', item.path)
+                        ))
+            for dup_item in dup_items:
+                replaced_items[item].append(dup_item)
+                log.debug('replacing item %i: %s' % (dup_item.id, item.path))
+        log.debug('%i of %i items replaced' % (len(replaced_items),
+                                               len(items)))
+
         # Move/copy files.
-        items = task.items if task.is_album else [task.item]
-        if config.copy and config.delete:
-            task.old_paths = [os.path.realpath(syspath(item.path))
-                              for item in items]
+        task.old_paths = [item.path for item in items]
         for item in items:
             if config.copy:
-                item.move(lib, True, task.is_album)
+                # If we're replacing an item, then move rather than
+                # copying.
+                do_copy = not bool(replaced_items[item])
+                item.move(lib, do_copy, task.is_album)
             if config.write and task.should_write_tags():
                 item.write()
 
         # Add items to library. We consolidate this at the end to avoid
         # locking while we do the copying and tag updates.
         try:
+            # Remove old items.
+            for replaced in replaced_items.itervalues():
+                for item in replaced:
+                    lib.remove(item)
+
+            # Add new ones.
             if task.is_album:
                 # Add an album.
                 album = lib.add_album(task.items)
@@ -560,6 +685,8 @@ def finalize(config):
         if task.should_skip():
             if config.resume is not False:
                 task.save_progress()
+            if config.incremental:
+                task.save_history()
             continue
 
         items = task.items if task.is_album else [task.item]
@@ -583,6 +710,8 @@ def finalize(config):
         # Update progress.
         if config.resume is not False:
             task.save_progress()
+        if config.incremental:
+            task.save_history()
 
 
 # Singleton pipeline stages.
@@ -616,17 +745,10 @@ def item_query(config):
         log_choice(config, task)
 
         # Duplicate check.
-        if task.choice_flag in (action.ASIS, action.APPLY):
-            if choice is action.ASIS:
-                artist = task.item.artist
-                title = task.item.title
-            else:
-                artist = task.info['artist']
-                title = task.info['title']
-            if _item_duplicate_check(lib, artist, title, recent):
-                tag_log(config.logfile, 'duplicate', task.item.path)
-                log.warn("This item is already in the library!")
-                task.set_choice(action.SKIP)
+        if _item_duplicate_check(lib, task, recent):
+            tag_log(config.logfile, 'duplicate', task.item.path)
+            log.warn("This item is already in the library!")
+            task.set_choice(action.SKIP)
 
 def item_progress(config):
     """Skips the lookup and query stages in a non-autotagged singleton
@@ -653,7 +775,10 @@ def run_import(**kwargs):
     config = ImportConfig(**kwargs)
     
     # Set up the pipeline.
-    stages = [read_tasks(config)]
+    if config.query is None:
+        stages = [read_tasks(config)]
+    else:
+        stages = [query_tasks(config)]
     if config.singletons:
         # Singleton importer.
         if config.autot:

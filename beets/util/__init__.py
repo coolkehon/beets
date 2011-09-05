@@ -16,6 +16,7 @@
 import os
 import sys
 import re
+import shutil
 from collections import defaultdict
 
 MAX_FILENAME_LENGTH = 200
@@ -83,11 +84,12 @@ def mkdirall(path):
         if not os.path.isdir(syspath(ancestor)):
             os.mkdir(syspath(ancestor))
 
-def prune_dirs(path, root):
+def prune_dirs(path, root, clutter=('.DS_Store', 'Thumbs.db')):
     """If path is an empty directory, then remove it. Recursively
     remove path's ancestry up to root (which is never removed) where
     there are empty directories. If path is not contained in root, then
-    nothing is removed.
+    nothing is removed. Filenames in clutter are ignored when
+    determining emptiness.
     """
     path = normpath(path)
     root = normpath(root)
@@ -101,9 +103,14 @@ def prune_dirs(path, root):
         ancestors.append(path)
         ancestors.reverse()
         for directory in ancestors:
-            try:
-                os.rmdir(syspath(directory))
-            except OSError:
+            directory = syspath(directory)
+            if all(fn in clutter for fn in os.listdir(directory)):
+                # Directory contains only clutter (or nothing).
+                try:
+                    shutil.rmtree(directory)
+                except OSError:
+                    break
+            else:
                 break
 
 def components(path, pathmod=None):
@@ -168,11 +175,41 @@ def syspath(path, pathmod=None):
 
     return path
 
+def samefile(p1, p2):
+    """Safer equality for paths."""
+    return shutil._samefile(syspath(p1), syspath(p2))
+
 def soft_remove(path):
     """Remove the file if it exists."""
     path = syspath(path)
     if os.path.exists(path):
         os.remove(path)
+
+def _assert_not_exists(path, pathmod=None):
+    """Raises an OSError if the path exists."""
+    pathmod = pathmod or os.path
+    if pathmod.exists(path):
+        raise OSError('file exists: %s' % path)
+
+def copy(path, dest, replace=False, pathmod=None):
+    """Copy a plain file. Permissions are not copied. If dest already
+    exists, raises an OSError unless replace is True. Paths are
+    translated to system paths before the syscall.
+    """
+    path = syspath(path)
+    dest = syspath(dest)
+    _assert_not_exists(dest, pathmod)
+    return shutil.copyfile(path, dest)
+
+def move(path, dest, replace=False, pathmod=None):
+    """Rename a file. dest may not be a directory. If dest already
+    exists, raises an OSError unless replace is True. Paths are
+    translated to system paths.
+    """
+    path = syspath(path)
+    dest = syspath(dest)
+    _assert_not_exists(dest, pathmod)
+    return shutil.move(path, dest)
 
 # Note: POSIX actually supports \ and : -- I just think they're
 # a pain. And ? has caused problems for some.
@@ -180,7 +217,7 @@ CHAR_REPLACE = [
     (re.compile(r'[\\/\?]|^\.'), '_'),
     (re.compile(r':'), '-'),
 ]
-CHAR_REPLACE_WINDOWS = re.compile('["\*<>\|]|^\.|\.$| +$'), '_'
+CHAR_REPLACE_WINDOWS = re.compile(r'["\*<>\|]|^\.|\.$| +$'), '_'
 def sanitize_path(path, pathmod=None):
     """Takes a path and makes sure that it is legal. Returns a new path.
     Only works with fragments; won't work reliably on Windows when a

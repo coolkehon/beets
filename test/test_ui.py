@@ -26,6 +26,7 @@ from beets import ui
 from beets.ui import commands
 from beets import autotag
 from beets import importer
+from beets.mediafile import MediaFile
 
 class ListTest(unittest.TestCase):
     def setUp(self):
@@ -119,6 +120,244 @@ class RemoveTest(unittest.TestCase):
         self.assertEqual(len(list(items)), 0)
         self.assertFalse(os.path.exists(self.i.path))
 
+class ModifyTest(unittest.TestCase):
+    def setUp(self):
+        self.io = _common.DummyIO()
+        self.io.install()
+
+        self.libdir = os.path.join(_common.RSRC, 'testlibdir')
+        os.mkdir(self.libdir)
+
+        # Copy a file into the library.
+        self.lib = library.Library(':memory:', self.libdir)
+        self.i = library.Item.from_path(os.path.join(_common.RSRC, 'full.mp3'))
+        self.lib.add(self.i, True)
+        self.album = self.lib.add_album([self.i])
+
+    def tearDown(self):
+        self.io.restore()
+        shutil.rmtree(self.libdir)
+
+    def _modify(self, mods, query=(), write=False, move=False, album=False):
+        self.io.addinput('y')
+        commands.modify_items(self.lib, mods, query,
+                              write, move, album, True, True)
+
+    def test_modify_item_dbdata(self):
+        self._modify(["title=newTitle"])
+        item = self.lib.items().next()
+        self.assertEqual(item.title, 'newTitle')
+
+    def test_modify_album_dbdata(self):
+        self._modify(["album=newAlbum"], album=True)
+        album = self.lib.albums()[0]
+        self.assertEqual(album.album, 'newAlbum')
+
+    def test_modify_item_tag_unmodified(self):
+        self._modify(["title=newTitle"], write=False)
+        item = self.lib.items().next()
+        item.read()
+        self.assertEqual(item.title, 'full')
+
+    def test_modify_album_tag_unmodified(self):
+        self._modify(["album=newAlbum"], write=False, album=True)
+        item = self.lib.items().next()
+        item.read()
+        self.assertEqual(item.album, 'the album')
+
+    def test_modify_item_tag(self):
+        self._modify(["title=newTitle"], write=True)
+        item = self.lib.items().next()
+        item.read()
+        self.assertEqual(item.title, 'newTitle')
+
+    def test_modify_album_tag(self):
+        self._modify(["album=newAlbum"], write=True, album=True)
+        item = self.lib.items().next()
+        item.read()
+        self.assertEqual(item.album, 'newAlbum')
+
+    def test_item_move(self):
+        self._modify(["title=newTitle"], move=True)
+        item = self.lib.items().next()
+        self.assertTrue('newTitle' in item.path)
+
+    def test_album_move(self):
+        self._modify(["album=newAlbum"], move=True, album=True)
+        item = self.lib.items().next()
+        item.read()
+        self.assertTrue('newAlbum' in item.path)
+
+    def test_item_not_move(self):
+        self._modify(["title=newTitle"], move=False)
+        item = self.lib.items().next()
+        self.assertFalse('newTitle' in item.path)
+
+    def test_album_not_move(self):
+        self._modify(["album=newAlbum"], move=False, album=True)
+        item = self.lib.items().next()
+        item.read()
+        self.assertFalse('newAlbum' in item.path)
+
+class MoveTest(unittest.TestCase, _common.ExtraAsserts):
+    def setUp(self):
+        self.io = _common.DummyIO()
+        self.io.install()
+
+        self.libdir = os.path.join(_common.RSRC, 'testlibdir')
+        os.mkdir(self.libdir)
+
+        self.itempath = os.path.join(self.libdir, 'srcfile')
+        shutil.copy(os.path.join(_common.RSRC, 'full.mp3'), self.itempath)
+
+        # Add a file to the library but don't copy it in yet.
+        self.lib = library.Library(':memory:', self.libdir)
+        self.i = library.Item.from_path(self.itempath)
+        self.lib.add(self.i, False)
+        self.album = self.lib.add_album([self.i])
+
+        # Alternate destination directory.
+        self.otherdir = os.path.join(_common.RSRC, 'testotherdir')
+
+    def tearDown(self):
+        self.io.restore()
+        shutil.rmtree(self.libdir)
+        if os.path.exists(self.otherdir):
+            shutil.rmtree(self.otherdir)
+
+    def _move(self, query=(), dest=None, copy=False, album=False):
+        commands.move_items(self.lib, dest, query, copy, album)
+
+    def test_move_item(self):
+        self._move()
+        self.lib.load(self.i)
+        self.assertTrue('testlibdir' in self.i.path)
+        self.assertExists(self.i.path)
+        self.assertNotExists(self.itempath)
+
+    def test_copy_item(self):
+        self._move(copy=True)
+        self.lib.load(self.i)
+        self.assertTrue('testlibdir' in self.i.path)
+        self.assertExists(self.i.path)
+        self.assertExists(self.itempath)
+
+    def test_move_album(self):
+        self._move(album=True)
+        self.lib.load(self.i)
+        self.assertTrue('testlibdir' in self.i.path)
+        self.assertExists(self.i.path)
+        self.assertNotExists(self.itempath)
+
+    def test_copy_album(self):
+        self._move(copy=True, album=True)
+        self.lib.load(self.i)
+        self.assertTrue('testlibdir' in self.i.path)
+        self.assertExists(self.i.path)
+        self.assertExists(self.itempath)
+
+    def test_move_item_custom_dir(self):
+        self._move(dest=self.otherdir)
+        self.lib.load(self.i)
+        self.assertTrue('testotherdir' in self.i.path)
+        self.assertExists(self.i.path)
+        self.assertNotExists(self.itempath)
+
+    def test_move_album_custom_dir(self):
+        self._move(dest=self.otherdir, album=True)
+        self.lib.load(self.i)
+        self.assertTrue('testotherdir' in self.i.path)
+        self.assertExists(self.i.path)
+        self.assertNotExists(self.itempath)
+
+class UpdateTest(unittest.TestCase, _common.ExtraAsserts):
+    def setUp(self):
+        self.io = _common.DummyIO()
+        self.io.install()
+
+        self.libdir = os.path.join(_common.RSRC, 'testlibdir')
+        os.mkdir(self.libdir)
+
+        # Copy a file into the library.
+        self.lib = library.Library(':memory:', self.libdir)
+        self.i = library.Item.from_path(os.path.join(_common.RSRC, 'full.mp3'))
+        self.lib.add(self.i, True)
+        self.album = self.lib.add_album([self.i])
+
+        # Album art.
+        artfile = os.path.join(_common.RSRC, 'testart.jpg')
+        _common.touch(artfile)
+        self.album.set_art(artfile)
+        os.remove(artfile)
+
+    def tearDown(self):
+        self.io.restore()
+        shutil.rmtree(self.libdir)
+
+    def _update(self, query=(), album=False, move=False):
+        self.io.addinput('y')
+        commands.update_items(self.lib, query, album, move, True)
+
+    def test_delete_removes_item(self):
+        self.assertTrue(list(self.lib.items()))
+        os.remove(self.i.path)
+        self._update()
+        self.assertFalse(list(self.lib.items()))
+
+    def test_delete_removes_album(self):
+        self.assertTrue(self.lib.albums())
+        os.remove(self.i.path)
+        self._update()
+        self.assertFalse(self.lib.albums())
+
+    def test_delete_removes_album_art(self):
+        artpath = self.album.artpath
+        self.assertExists(artpath)
+        os.remove(self.i.path)
+        self._update()
+        self.assertNotExists(artpath)
+
+    def test_modified_metadata_detected(self):
+        mf = MediaFile(self.i.path)
+        mf.title = 'differentTitle'
+        mf.save()
+        self._update()
+        item = self.lib.items().next()
+        self.assertEqual(item.title, 'differentTitle')
+
+    def test_modified_metadata_moved(self):
+        mf = MediaFile(self.i.path)
+        mf.title = 'differentTitle'
+        mf.save()
+        self._update(move=True)
+        item = self.lib.items().next()
+        self.assertTrue('differentTitle' in item.path)
+
+    def test_modified_metadata_not_moved(self):
+        mf = MediaFile(self.i.path)
+        mf.title = 'differentTitle'
+        mf.save()
+        self._update(move=False)
+        item = self.lib.items().next()
+        self.assertTrue('differentTitle' not in item.path)
+
+    def test_modified_album_metadata_moved(self):
+        mf = MediaFile(self.i.path)
+        mf.album = 'differentAlbum'
+        mf.save()
+        self._update(move=True)
+        item = self.lib.items().next()
+        self.assertTrue('differentAlbum' in item.path)
+
+    def test_modified_album_metadata_art_moved(self):
+        artpath = self.album.artpath
+        mf = MediaFile(self.i.path)
+        mf.album = 'differentAlbum'
+        mf.save()
+        self._update(move=True)
+        album = self.lib.albums()[0]
+        self.assertNotEqual(artpath, album.artpath)
+
 class PrintTest(unittest.TestCase):
     def setUp(self):
         self.io = _common.DummyIO()
@@ -189,7 +428,8 @@ class ImportTest(unittest.TestCase):
     def test_quiet_timid_disallowed(self):
         self.assertRaises(ui.UserError, commands.import_files,
                           None, [], False, False, False, None, False, False,
-                          False, False, True, False, None, False, True)
+                          False, False, True, False, None, False, True, None,
+                          False)
 
 class InputTest(unittest.TestCase):
     def setUp(self):
