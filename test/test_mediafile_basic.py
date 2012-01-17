@@ -32,9 +32,13 @@ def MakeReadingTest(path, correct_dict, field):
         def runTest(self):
             got = getattr(self.f, field)
             correct = correct_dict[field]
-            self.assertEqual(got, correct,
-                field + ' incorrect (expected ' + repr(correct) + ', got ' + \
-                repr(got) + ') when testing ' + os.path.basename(path))
+            message = field + ' incorrect (expected ' + repr(correct) + \
+                      ', got ' + repr(got) + ') when testing ' + \
+                      os.path.basename(path)
+            if isinstance(correct, float):
+                self.assertAlmostEqual(got, correct, msg=message)
+            else:
+                self.assertEqual(got, correct, message)
     return ReadingTest
 
 def MakeReadOnlyTest(path, field, value):
@@ -74,6 +78,8 @@ def MakeWritingTest(path, correct_dict, field, testsuffix='_test'):
                 self.value = correct_dict[field] + datetime.timedelta(42)
             elif type(correct_dict[field]) is str:
                 self.value = 'TestValue-' + str(field)
+            elif type(correct_dict[field]) is float:
+                self.value = 9.87
             else:
                 raise ValueError('unknown field type ' + \
                         str(type(correct_dict[field])))
@@ -91,13 +97,20 @@ def MakeWritingTest(path, correct_dict, field, testsuffix='_test'):
                 
                 # Make sure the modified field was changed correctly...
                 if readfield == field:
-                    self.assertEqual(got, self.value,
-                        field + ' modified incorrectly (changed to ' + \
-                        repr(self.value) + ' but read ' + repr(got) + \
-                        ') when testing ' + os.path.basename(path))
+                    message = field + ' modified incorrectly (changed to ' + \
+                              repr(self.value) + ' but read ' + repr(got) + \
+                              ') when testing ' + os.path.basename(path)
+                    if isinstance(self.value, float):
+                        self.assertAlmostEqual(got, self.value, msg=message)
+                    else:
+                        self.assertEqual(got, self.value, message)
                 
                 # ... and that no other field was changed.
                 else:
+                    # MPEG-4: ReplayGain not implented.
+                    if 'm4a' in path and readfield.startswith('rg_'):
+                        continue
+
                     # The value should be what it was originally most of the
                     # time.
                     correct = correct_dict[readfield]
@@ -117,11 +130,14 @@ def MakeWritingTest(path, correct_dict, field, testsuffix='_test'):
                     if field=='date' and readfield in ('year', 'month', 'day'):
                         correct = getattr(self.value, readfield)
                     
-                    self.assertEqual(got, correct,
-                        readfield + ' changed when it should not have'
-                        ' (expected ' + repr(correct) + ', got ' + \
-                        repr(got) + ') when modifying ' + field + ' in ' + \
-                        os.path.basename(path))
+                    message = readfield + ' changed when it should not have' \
+                              ' (expected ' + repr(correct) + ', got ' + \
+                              repr(got) + ') when modifying ' + field + \
+                              ' in ' + os.path.basename(path)
+                    if isinstance(correct, float):
+                        self.assertAlmostEqual(got, correct, msg=message)
+                    else:
+                        self.assertEqual(got, correct, message)
                 
         def tearDown(self):
             if os.path.exists(self.tpath):
@@ -156,6 +172,11 @@ correct_dicts = {
         'mb_artistid':'7cf0ea9d-86b9-4dad-ba9e-2355a64899ea',
         'art':        None,
         'label':      u'the label',
+
+        'rg_track_peak': 0.0,
+        'rg_track_gain': 0.0,
+        'rg_album_peak': 0.0,
+        'rg_album_gain': 0.0,
     },
 
     # Additional coverage for common cases when "total" fields are unset.
@@ -260,6 +281,9 @@ read_only_correct_dicts = {
 def suite_for_file(path, correct_dict, writing=True):
     s = unittest.TestSuite()
     for field in correct_dict:
+        if 'm4a' in path and field.startswith('rg_'):
+            # MPEG-4 files: ReplayGain values not implemented.
+            continue
         s.addTest(MakeReadingTest(path, correct_dict, field)())
         if writing and \
            not (   field == 'month' and correct_dict['year']  == 0

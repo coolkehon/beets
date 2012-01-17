@@ -1,5 +1,5 @@
 # This file is part of beets.
-# Copyright 2010, Adrian Sampson.
+# Copyright 2011, Adrian Sampson.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -14,12 +14,13 @@
 
 """Tests for non-query database functions of Item.
 """
-
 import unittest
 import os
 import sqlite3
 import ntpath
 import posixpath
+import shutil
+import re
 
 import _common
 from _common import item
@@ -137,17 +138,17 @@ class DestinationTest(unittest.TestCase):
     
     def test_directory_works_with_trailing_slash(self):
         self.lib.directory = 'one/'
-        self.lib.path_formats = {'default': 'two'}
+        self.lib.path_formats = [('default', 'two')]
         self.assertEqual(self.lib.destination(self.i), np('one/two'))
     
     def test_directory_works_without_trailing_slash(self):
         self.lib.directory = 'one'
-        self.lib.path_formats = {'default': 'two'}
+        self.lib.path_formats = [('default', 'two')]
         self.assertEqual(self.lib.destination(self.i), np('one/two'))
     
     def test_destination_substitues_metadata_values(self):
         self.lib.directory = 'base'
-        self.lib.path_formats = {'default': '$album/$artist $title'}
+        self.lib.path_formats = [('default', '$album/$artist $title')]
         self.i.title = 'three'
         self.i.artist = 'two'
         self.i.album = 'one'
@@ -156,23 +157,31 @@ class DestinationTest(unittest.TestCase):
     
     def test_destination_preserves_extension(self):
         self.lib.directory = 'base'
-        self.lib.path_formats = {'default': '$title'}
+        self.lib.path_formats = [('default', '$title')]
         self.i.path = 'hey.audioFormat'
         self.assertEqual(self.lib.destination(self.i),
                          np('base/the title.audioFormat'))
     
     def test_destination_pads_some_indices(self):
         self.lib.directory = 'base'
-        self.lib.path_formats = {'default': '$track $tracktotal ' \
-            '$disc $disctotal $bpm $year'}
+        self.lib.path_formats = [('default', '$track $tracktotal ' \
+            '$disc $disctotal $bpm')]
         self.i.track = 1
         self.i.tracktotal = 2
         self.i.disc = 3
         self.i.disctotal = 4
         self.i.bpm = 5
-        self.i.year = 6
         self.assertEqual(self.lib.destination(self.i),
-                         np('base/01 02 03 04 5 6'))
+                         np('base/01 02 03 04 5'))
+
+    def test_destination_pads_date_values(self):
+        self.lib.directory = 'base'
+        self.lib.path_formats = [('default', '$year-$month-$day')]
+        self.i.year = 1
+        self.i.month = 2
+        self.i.day = 3
+        self.assertEqual(self.lib.destination(self.i),
+                         np('base/0001-02-03'))
     
     def test_destination_escapes_slashes(self):
         self.i.album = 'one/two'
@@ -230,13 +239,13 @@ class DestinationTest(unittest.TestCase):
         self.assertFalse('<' in p)
         self.assertFalse('>' in p)
         self.assertFalse('|' in p)
-    
+
     def test_sanitize_replaces_colon_with_dash(self):
         p = util.sanitize_path(u':', posixpath)
         self.assertEqual(p, u'-')
     
     def test_path_with_format(self):
-        self.lib.path_formats = {'default': '$artist/$album ($format)'}
+        self.lib.path_formats = [('default', '$artist/$album ($format)')]
         p = self.lib.destination(self.i)
         self.assert_('(FLAC)' in p)
 
@@ -244,7 +253,7 @@ class DestinationTest(unittest.TestCase):
         i1, i2 = item(), item()
         self.lib.add_album([i1, i2])
         i1.year, i2.year = 2009, 2010
-        self.lib.path_formats = {'default': '$album ($year)/$track $title'}
+        self.lib.path_formats = [('default', '$album ($year)/$track $title')]
         dest1, dest2 = self.lib.destination(i1), self.lib.destination(i2)
         self.assertEqual(os.path.dirname(dest1), os.path.dirname(dest2))
     
@@ -252,44 +261,51 @@ class DestinationTest(unittest.TestCase):
         self.i.comp = False
         self.lib.add_album([self.i])
         self.lib.directory = 'one'
-        self.lib.path_formats = {'default': 'two',
-                                 'comp': 'three'}
+        self.lib.path_formats = [('default', 'two'),
+                                 ('comp:true', 'three')]
         self.assertEqual(self.lib.destination(self.i), np('one/two'))
 
     def test_singleton_path(self):
         i = item()
         self.lib.directory = 'one'
-        self.lib.path_formats = {'default': 'two',
-                                 'comp': 'three',
-                                 'singleton': 'four'}
+        self.lib.path_formats = [
+            ('default', 'two'),
+            ('singleton:true', 'four'),
+            ('comp:true', 'three'),
+        ]
         self.assertEqual(self.lib.destination(i), np('one/four'))
 
-    def test_singleton_track_falls_back_to_default(self):
+    def test_comp_before_singleton_path(self):
         i = item()
         i.comp = True
-        i.albumtype = 'atype'
         self.lib.directory = 'one'
-        self.lib.path_formats = {'default': 'two',
-                                 'comp': 'three',
-                                 'atype': 'four'}
-        self.assertEqual(self.lib.destination(i), np('one/two'))
+        self.lib.path_formats = [
+            ('default', 'two'),
+            ('comp:true', 'three'),
+            ('singleton:true', 'four'),
+        ]
+        self.assertEqual(self.lib.destination(i), np('one/three'))
 
     def test_comp_path(self):
         self.i.comp = True
         self.lib.add_album([self.i])
         self.lib.directory = 'one'
-        self.lib.path_formats = {'default': 'two',
-                                 'comp': 'three'}
+        self.lib.path_formats = [
+            ('default', 'two'),
+            ('comp:true', 'three'),
+        ]
         self.assertEqual(self.lib.destination(self.i), np('one/three'))
 
-    def test_albumtype_path(self):
+    def test_albumtype_query_path(self):
         self.i.comp = True
         self.lib.add_album([self.i])
         self.i.albumtype = 'sometype'
         self.lib.directory = 'one'
-        self.lib.path_formats = {'default': 'two',
-                                 'comp': 'three',
-                                 'sometype': 'four'}
+        self.lib.path_formats = [
+            ('default', 'two'),
+            ('albumtype:sometype', 'four'),
+            ('comp:true', 'three'),
+        ]
         self.assertEqual(self.lib.destination(self.i), np('one/four'))
 
     def test_albumtype_path_fallback_to_comp(self):
@@ -297,9 +313,11 @@ class DestinationTest(unittest.TestCase):
         self.lib.add_album([self.i])
         self.i.albumtype = 'sometype'
         self.lib.directory = 'one'
-        self.lib.path_formats = {'default': 'two',
-                                 'comp': 'three',
-                                 'anothertype': 'four'}
+        self.lib.path_formats = [
+            ('default', 'two'),
+            ('albumtype:anothertype', 'four'),
+            ('comp:true', 'three'),
+        ]
         self.assertEqual(self.lib.destination(self.i), np('one/three'))
 
     def test_syspath_windows_format(self):
@@ -333,28 +351,28 @@ class DestinationTest(unittest.TestCase):
     def test_artist_falls_back_to_albumartist(self):
         self.i.artist = ''
         self.i.albumartist = 'something'
-        self.lib.path_formats = {'default': '$artist'}
+        self.lib.path_formats = [('default', '$artist')]
         p = self.lib.destination(self.i)
         self.assertEqual(p.rsplit(os.path.sep, 1)[1], 'something')
 
     def test_albumartist_falls_back_to_artist(self):
         self.i.artist = 'trackartist'
         self.i.albumartist = ''
-        self.lib.path_formats = {'default': '$albumartist'}
+        self.lib.path_formats = [('default', '$albumartist')]
         p = self.lib.destination(self.i)
         self.assertEqual(p.rsplit(os.path.sep, 1)[1], 'trackartist')
 
     def test_artist_overrides_albumartist(self):
         self.i.artist = 'theartist'
         self.i.albumartist = 'something'
-        self.lib.path_formats = {'default': '$artist'}
+        self.lib.path_formats = [('default', '$artist')]
         p = self.lib.destination(self.i)
         self.assertEqual(p.rsplit(os.path.sep, 1)[1], 'theartist')
 
     def test_albumartist_overrides_artist(self):
         self.i.artist = 'theartist'
         self.i.albumartist = 'something'
-        self.lib.path_formats = {'default': '$albumartist'}
+        self.lib.path_formats = [('default', '$albumartist')]
         p = self.lib.destination(self.i)
         self.assertEqual(p.rsplit(os.path.sep, 1)[1], 'something')
 
@@ -362,6 +380,72 @@ class DestinationTest(unittest.TestCase):
         p = util.sanitize_path('', posixpath)
         self.assertEqual(p, '')
 
+    def test_sanitize_with_custom_replace_overrides_built_in_sub(self):
+        p = util.sanitize_path('a/.?/b', posixpath, [
+            (re.compile(r'foo'), 'bar'),
+        ])
+        self.assertEqual(p, 'a/.?/b')
+
+    def test_sanitize_with_custom_replace_adds_replacements(self):
+        p = util.sanitize_path('foo/bar', posixpath, [
+            (re.compile(r'foo'), 'bar'),
+        ])
+        self.assertEqual(p, 'bar/bar')
+
+class DestinationFunctionTest(unittest.TestCase):
+    def setUp(self):
+        self.lib = beets.library.Library(':memory:')
+        self.lib.directory = '/base'
+        self.lib.path_formats = [('default', u'path')]
+        self.i = item()
+    def tearDown(self):
+        self.lib.conn.close()
+
+    def _setf(self, fmt):
+        self.lib.path_formats.insert(0, ('default', fmt))
+    def _assert_dest(self, dest):
+        self.assertEqual(self.lib.destination(self.i), dest)
+
+    def test_upper_case_literal(self):
+        self._setf(u'%upper{foo}')
+        self._assert_dest('/base/FOO')
+    
+    def test_upper_case_variable(self):
+        self._setf(u'%upper{$title}')
+        self._assert_dest('/base/THE TITLE')
+
+    def test_title_case_variable(self):
+        self._setf(u'%title{$title}')
+        self._assert_dest('/base/The Title')
+
+    def test_left_variable(self):
+        self._setf(u'%left{$title, 3}')
+        self._assert_dest('/base/the')
+    
+    def test_right_variable(self):
+        self._setf(u'%right{$title,3}')
+        self._assert_dest('/base/tle')
+
+    def test_if_false(self):
+        self._setf(u'x%if{,foo}')
+        self._assert_dest('/base/x')
+    
+    def test_if_true(self):
+        self._setf(u'%if{bar,foo}')
+        self._assert_dest('/base/foo')
+    
+    def test_if_else_false(self):
+        self._setf(u'%if{,foo,baz}')
+        self._assert_dest('/base/baz')
+
+    def test_if_int_value(self):
+        self._setf(u'%if{0,foo,baz}')
+        self._assert_dest('/base/baz')
+
+    def test_nonexistent_function(self):
+        self._setf(u'%foo{bar}')
+        self._assert_dest('/base/%foo{bar}')
+    
 class MigrationTest(unittest.TestCase):
     """Tests the ability to change the database schema between
     versions.
@@ -652,6 +736,38 @@ class PathStringTest(unittest.TestCase):
         )
         alb = self.lib.get_album(alb.id)
         self.assert_(isinstance(alb.artpath, str))
+
+class MtimeTest(unittest.TestCase):
+    def setUp(self):
+        self.ipath = os.path.join(_common.RSRC, 'testfile.mp3')
+        shutil.copy(os.path.join(_common.RSRC, 'full.mp3'), self.ipath)
+        self.i = beets.library.Item.from_path(self.ipath)
+        self.lib = beets.library.Library(':memory:')
+        self.lib.add(self.i)
+
+    def tearDown(self):
+        if os.path.exists(self.ipath):
+            os.remove(self.ipath)
+
+    def _mtime(self):
+        return os.path.getmtime(self.ipath)
+
+    def test_mtime_initially_up_to_date(self):
+        self.assertGreaterEqual(self.i.mtime, self._mtime())
+
+    def test_mtime_reset_on_db_modify(self):
+        self.i.title = 'something else'
+        self.assertLess(self.i.mtime, self._mtime())
+
+    def test_mtime_up_to_date_after_write(self):
+        self.i.title = 'something else'
+        self.i.write()
+        self.assertGreaterEqual(self.i.mtime, self._mtime())
+
+    def test_mtime_up_to_date_after_read(self):
+        self.i.title = 'something else'
+        self.i.read()
+        self.assertGreaterEqual(self.i.mtime, self._mtime())
 
 def suite():
     return unittest.TestLoader().loadTestsFromName(__name__)

@@ -17,6 +17,7 @@ import os
 import sys
 import re
 import shutil
+import fnmatch
 from collections import defaultdict
 
 MAX_FILENAME_LENGTH = 200
@@ -47,9 +48,10 @@ def ancestry(path, pathmod=None):
             out.insert(0, path)
     return out
 
-def sorted_walk(path):
-    """Like os.walk, but yields things in sorted, breadth-first
-    order.
+def sorted_walk(path, ignore=()):
+    """Like ``os.walk``, but yields things in sorted, breadth-first
+    order.  Directory and file names matching any glob pattern in
+    ``ignore`` are skipped.
     """
     # Make sure the path isn't a Unicode string.
     path = bytestring_path(path)
@@ -58,6 +60,16 @@ def sorted_walk(path):
     dirs = []
     files = []
     for base in os.listdir(path):
+        # Skip ignored filenames.
+        skip = False
+        for pat in ignore:
+            if fnmatch.fnmatch(base, pat):
+                skip = True
+                break
+        if skip:
+            continue
+
+        # Add to output as either a file or a directory.
         cur = os.path.join(path, base)
         if os.path.isdir(syspath(cur)):
             dirs.append(base)
@@ -73,7 +85,7 @@ def sorted_walk(path):
     for base in dirs:
         cur = os.path.join(path, base)
         # yield from _sorted_walk(cur)
-        for res in sorted_walk(cur):
+        for res in sorted_walk(cur, ignore):
             yield res
 
 def mkdirall(path):
@@ -104,6 +116,10 @@ def prune_dirs(path, root, clutter=('.DS_Store', 'Thumbs.db')):
         ancestors.reverse()
         for directory in ancestors:
             directory = syspath(directory)
+            if not os.path.exists(directory):
+                # Directory gone already.
+                continue
+
             if all(fn in clutter for fn in os.listdir(directory)):
                 # Directory contains only clutter (or nothing).
                 try:
@@ -146,8 +162,21 @@ def bytestring_path(path):
     encoding = sys.getfilesystemencoding() or sys.getdefaultencoding()
     try:
         return path.encode(encoding)
-    except UnicodeError:
+    except (UnicodeError, LookupError):
         return path.encode('utf8')
+
+def displayable_path(path):
+    """Attempts to decode a bytestring path to a unicode object for the
+    purpose of displaying it to the user.
+    """
+    if isinstance(path, unicode):
+        return path
+
+    encoding = sys.getfilesystemencoding() or sys.getdefaultencoding()
+    try:
+        return path.decode(encoding, 'ignore')
+    except (UnicodeError, LookupError):
+        return path.decode('utf8', 'ignore')
 
 def syspath(path, pathmod=None):
     """Convert a path for use by the operating system. In particular,
@@ -193,9 +222,12 @@ def _assert_not_exists(path, pathmod=None):
 
 def copy(path, dest, replace=False, pathmod=None):
     """Copy a plain file. Permissions are not copied. If dest already
-    exists, raises an OSError unless replace is True. Paths are
-    translated to system paths before the syscall.
+    exists, raises an OSError unless replace is True. Has no effect if
+    path is the same as dest. Paths are translated to system paths
+    before the syscall.
     """
+    if samefile(path, dest):
+        return
     path = syspath(path)
     dest = syspath(dest)
     _assert_not_exists(dest, pathmod)
@@ -203,39 +235,70 @@ def copy(path, dest, replace=False, pathmod=None):
 
 def move(path, dest, replace=False, pathmod=None):
     """Rename a file. dest may not be a directory. If dest already
-    exists, raises an OSError unless replace is True. Paths are
-    translated to system paths.
+    exists, raises an OSError unless replace is True. Hos no effect if
+    path is the same as dest. Paths are translated to system paths.
     """
+    if samefile(path, dest):
+        return
     path = syspath(path)
     dest = syspath(dest)
     _assert_not_exists(dest, pathmod)
     return shutil.move(path, dest)
 
+def unique_path(path):
+    """Returns a version of ``path`` that does not exist on the
+    filesystem. Specifically, if ``path` itself already exists, then
+    something unique is appended to the path.
+    """
+    if not os.path.exists(syspath(path)):
+        return path
+
+    base, ext = os.path.splitext(path)
+    match = re.search(r'\.(\d)+$', base)
+    if match:
+        num = int(match.group(1))
+        base = base[:match.start()]
+    else:
+        num = 0
+    while True:
+        num += 1
+        new_path = '%s.%i%s' % (base, num, ext)
+        if not os.path.exists(new_path):
+            return new_path
+
 # Note: POSIX actually supports \ and : -- I just think they're
 # a pain. And ? has caused problems for some.
 CHAR_REPLACE = [
-    (re.compile(r'[\\/\?]|^\.'), '_'),
+    (re.compile(r'[\\/\?"]|^\.'), '_'),
     (re.compile(r':'), '-'),
 ]
-CHAR_REPLACE_WINDOWS = re.compile(r'["\*<>\|]|^\.|\.$| +$'), '_'
-def sanitize_path(path, pathmod=None):
+CHAR_REPLACE_WINDOWS = [
+    (re.compile(r'["\*<>\|]|^\.|\.$|\s+$'), '_'),
+]
+def sanitize_path(path, pathmod=None, replacements=None):
     """Takes a path and makes sure that it is legal. Returns a new path.
     Only works with fragments; won't work reliably on Windows when a
     path begins with a drive letter. Path separators (including altsep!)
-    should already be cleaned from the path components.
+    should already be cleaned from the path components. If replacements
+    is specified, it is used *instead* of the default set of
+    replacements for the platform; it must be a list of (compiled regex,
+    replacement string) pairs.
     """
     pathmod = pathmod or os.path
     windows = pathmod.__name__ == 'ntpath'
+
+    # Choose the appropriate replacements.
+    if not replacements:
+        replacements = list(CHAR_REPLACE)
+        if windows:
+            replacements += CHAR_REPLACE_WINDOWS
     
     comps = components(path, pathmod)
     if not comps:
         return ''
     for i, comp in enumerate(comps):
         # Replace special characters.
-        for regex, repl in CHAR_REPLACE:
-            comp = regex.sub(repl, comp)
-        if windows:
-            regex, repl = CHAR_REPLACE_WINDOWS
+        for regex, repl in replacements:
             comp = regex.sub(repl, comp)
         
         # Truncate each component.
@@ -254,7 +317,11 @@ def sanitize_for_path(value, pathmod, key=None):
             if sep:
                 value = value.replace(sep, u'_')
     elif key in ('track', 'tracktotal', 'disc', 'disctotal'):
-        # pad with zeros
+        # Pad indices with zeros.
+        value = u'%02i' % value
+    elif key == 'year':
+        value = u'%04i' % value
+    elif key in ('month', 'day'):
         value = u'%02i' % value
     elif key == 'bitrate':
         # Bitrate gets formatted as kbps.
@@ -294,12 +361,16 @@ def levenshtein(s1, s2):
 
 def plurality(objs):
     """Given a sequence of comparable objects, returns the object that
-    is most common in the set and the frequency of that object.
+    is most common in the set and the frequency of that object. The
+    sequence must contain at least one object.
     """
     # Calculate frequencies.
     freqs = defaultdict(int)
     for obj in objs:
         freqs[obj] += 1
+
+    if not freqs:
+        raise ValueError('sequence must be non-empty')
 
     # Find object with maximum frequency.
     max_freq = 0

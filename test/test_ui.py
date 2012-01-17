@@ -18,7 +18,10 @@ import unittest
 import os
 import shutil
 import textwrap
+import logging
+import re
 from StringIO import StringIO
+import ConfigParser
 
 import _common
 from beets import library
@@ -294,9 +297,12 @@ class UpdateTest(unittest.TestCase, _common.ExtraAsserts):
         self.io.restore()
         shutil.rmtree(self.libdir)
 
-    def _update(self, query=(), album=False, move=False):
+    def _update(self, query=(), album=False, move=False, reset_mtime=True):
         self.io.addinput('y')
-        commands.update_items(self.lib, query, album, move, True)
+        if reset_mtime:
+            self.i.mtime = 0
+            self.lib.store(self.i)
+        commands.update_items(self.lib, query, album, move, True, False)
 
     def test_delete_removes_item(self):
         self.assertTrue(list(self.lib.items()))
@@ -357,6 +363,19 @@ class UpdateTest(unittest.TestCase, _common.ExtraAsserts):
         self._update(move=True)
         album = self.lib.albums()[0]
         self.assertNotEqual(artpath, album.artpath)
+
+    def test_mtime_match_skips_update(self):
+        mf = MediaFile(self.i.path)
+        mf.title = 'differentTitle'
+        mf.save()
+
+        # Make in-memory mtime match on-disk mtime.
+        self.i.mtime = os.path.getmtime(self.i.path)
+        self.lib.store(self.i)
+
+        self._update(reset_mtime=False)
+        item = self.lib.items().next()
+        self.assertEqual(item.title, 'full')
 
 class PrintTest(unittest.TestCase):
     def setUp(self):
@@ -429,7 +448,7 @@ class ImportTest(unittest.TestCase):
         self.assertRaises(ui.UserError, commands.import_files,
                           None, [], False, False, False, None, False, False,
                           False, False, True, False, None, False, True, None,
-                          False)
+                          False, [])
 
 class InputTest(unittest.TestCase):
     def setUp(self):
@@ -460,32 +479,16 @@ class ConfigTest(unittest.TestCase):
 
     def test_paths_section_respected(self):
         def func(lib, config, opts, args):
-            self.assertEqual(lib.path_formats['x'], 'y')
+            self.assertEqual(lib.path_formats[0], ('x', 'y'))
         self._run_main([], textwrap.dedent("""
             [paths]
             x=y"""), func)
 
     def test_default_paths_preserved(self):
         def func(lib, config, opts, args):
-            self.assertEqual(lib.path_formats['default'],
-                             ui.DEFAULT_PATH_FORMATS['default'])
+            self.assertEqual(lib.path_formats[1:],
+                             ui.DEFAULT_PATH_FORMATS)
         self._run_main([], textwrap.dedent("""
-            [paths]
-            x=y"""), func)
-
-    def test_default_paths_overriden_by_legacy_path_format(self):
-        def func(lib, config, opts, args):
-            self.assertEqual(lib.path_formats['default'], 'x')
-            self.assertEqual(len(lib.path_formats), 1)
-        self._run_main([], textwrap.dedent("""
-            [beets]
-            path_format=x"""), func)
-
-    def test_paths_section_overriden_by_cli_switch(self):
-        def func(lib, config, opts, args):
-            self.assertEqual(lib.path_formats['default'], 'z')
-            self.assertEqual(len(lib.path_formats), 1)
-        self._run_main(['-p', 'z'], textwrap.dedent("""
             [paths]
             x=y"""), func)
 
@@ -501,6 +504,233 @@ class ConfigTest(unittest.TestCase):
                 [beets]
                 library: /xxx/yyy/not/a/real/path
             """), func)
+
+    def test_replacements_parsed(self):
+        def func(lib, config, opts, args):
+            replacements = lib.replacements
+            self.assertEqual(replacements, [(re.compile(r'[xy]'), 'z')])
+        self._run_main([], textwrap.dedent("""
+            [beets]
+            replace=[xy] z"""), func)
+
+    def test_empty_replacements_produce_none(self):
+        def func(lib, config, opts, args):
+            replacements = lib.replacements
+            self.assertFalse(replacements)
+        self._run_main([], textwrap.dedent("""
+            [beets]
+            """), func)
+
+    def test_multiple_replacements_parsed(self):
+        def func(lib, config, opts, args):
+            replacements = lib.replacements
+            self.assertEqual(replacements, [
+                (re.compile(r'[xy]'), 'z'),
+                (re.compile(r'foo'), 'bar'),
+            ])
+        self._run_main([], textwrap.dedent("""
+            [beets]
+            replace=[xy] z
+                foo bar"""), func)
+
+class ShowdiffTest(unittest.TestCase):
+    def setUp(self):
+        self.io = _common.DummyIO()
+        self.io.install()
+    def tearDown(self):
+        self.io.restore()
+
+    def test_showdiff_strings(self):
+        commands._showdiff('field', 'old', 'new', True)
+        out = self.io.getoutput()
+        self.assertTrue('field' in out)
+
+    def test_showdiff_identical(self):
+        commands._showdiff('field', 'old', 'old', True)
+        out = self.io.getoutput()
+        self.assertFalse('field' in out)
+
+    def test_showdiff_ints(self):
+        commands._showdiff('field', 2, 3, True)
+        out = self.io.getoutput()
+        self.assertTrue('field' in out)
+
+    def test_showdiff_ints_no_color(self):
+        commands._showdiff('field', 2, 3, False)
+        out = self.io.getoutput()
+        self.assertTrue('field' in out)
+
+    def test_showdiff_shows_both(self):
+        commands._showdiff('field', 'old', 'new', True)
+        out = self.io.getoutput()
+        self.assertTrue('old' in out)
+        self.assertTrue('new' in out)
+
+    def test_showdiff_floats_close_to_identical(self):
+        commands._showdiff('field', 1.999, 2.001, True)
+        out = self.io.getoutput()
+        self.assertFalse('field' in out)
+
+    def test_showdiff_floats_differenct(self):
+        commands._showdiff('field', 1.999, 4.001, True)
+        out = self.io.getoutput()
+        self.assertTrue('field' in out)
+
+    def test_showdiff_ints_colorizing_is_not_stringwise(self):
+        commands._showdiff('field', 222, 333, True)
+        complete_diff = self.io.getoutput().split()[1]
+
+        commands._showdiff('field', 222, 232, True)
+        partial_diff = self.io.getoutput().split()[1]
+
+        self.assertEqual(complete_diff, partial_diff)
+
+AN_ID = "28e32c71-1450-463e-92bf-e0a46446fc11"
+class ManualIDTest(unittest.TestCase):
+    def setUp(self):
+        _common.log.setLevel(logging.CRITICAL)
+        self.io = _common.DummyIO()
+        self.io.install()
+    def tearDown(self):
+        self.io.restore()
+
+    def test_id_accepted(self):
+        self.io.addinput(AN_ID)
+        out = commands.manual_id(False)
+        self.assertEqual(out, AN_ID)
+
+    def test_non_id_returns_none(self):
+        self.io.addinput("blah blah")
+        out = commands.manual_id(False)
+        self.assertEqual(out, None)
+
+    def test_url_finds_id(self):
+        self.io.addinput("http://musicbrainz.org/entity/%s?something" % AN_ID)
+        out = commands.manual_id(False)
+        self.assertEqual(out, AN_ID)
+
+class ShowChangeTest(unittest.TestCase):
+    def setUp(self):
+        self.io = _common.DummyIO()
+        self.io.install()
+    def tearDown(self):
+        self.io.restore()
+
+    def _items_and_info(self):
+        items = [_common.item()]
+        items[0].track = 1
+        items[0].path = '/path/to/file.mp3'
+        info = autotag.AlbumInfo(
+            'the album', 'album id', 'the artist', 'artist id', [
+                autotag.TrackInfo('the title', 'track id')
+        ])
+        return items, info
+
+    def test_null_change(self):
+        items, info = self._items_and_info()
+        commands.show_change('the artist', 'the album',
+                             items, info, 0.1, color=False)
+        msg = self.io.getoutput().lower()
+        self.assertTrue('similarity: 90' in msg)
+        self.assertTrue('tagging:' in msg)
+
+    def test_album_data_change(self):
+        items, info = self._items_and_info()
+        commands.show_change('another artist', 'another album',
+                             items, info, 0.1, color=False)
+        msg = self.io.getoutput().lower()
+        self.assertTrue('correcting tags from:' in msg)
+
+    def test_item_data_change(self):
+        items, info = self._items_and_info()
+        items[0].title = 'different'
+        commands.show_change('the artist', 'the album',
+                             items, info, 0.1, color=False)
+        msg = self.io.getoutput().lower()
+        self.assertTrue('different -> the title' in msg)
+
+    def test_item_data_change_with_unicode(self):
+        items, info = self._items_and_info()
+        items[0].title = u'caf\xe9'
+        commands.show_change('the artist', 'the album',
+                             items, info, 0.1, color=False)
+        msg = self.io.getoutput().lower()
+        self.assertTrue(u'caf\xe9 -> the title' in msg.decode('utf8'))
+
+    def test_album_data_change_with_unicode(self):
+        items, info = self._items_and_info()
+        commands.show_change(u'caf\xe9', u'another album',
+                             items, info, 0.1, color=False)
+        msg = self.io.getoutput().lower()
+        self.assertTrue('correcting tags from:' in msg)
+
+    def test_item_data_change_title_missing(self):
+        items, info = self._items_and_info()
+        items[0].title = ''
+        commands.show_change('the artist', 'the album',
+                             items, info, 0.1, color=False)
+        msg = self.io.getoutput().lower()
+        self.assertTrue('file.mp3 -> the title' in msg)
+
+    def test_item_data_change_title_missing_with_unicode_filename(self):
+        items, info = self._items_and_info()
+        items[0].title = ''
+        items[0].path = u'/path/to/caf\xe9.mp3'.encode('utf8')
+        commands.show_change('the artist', 'the album',
+                             items, info, 0.1, color=False)
+        msg = self.io.getoutput().lower()
+        self.assertTrue(u'caf\xe9.mp3 -> the title' in msg.decode('utf8'))
+
+class DefaultPathTest(unittest.TestCase):
+    def setUp(self):
+        self.old_home = os.environ.get('HOME')
+        self.old_appdata = os.environ.get('APPDATA')
+        os.environ['HOME'] = 'xhome'
+        os.environ['APPDATA'] = 'xappdata'
+    def tearDown(self):
+        if self.old_home is None:
+            del os.environ['HOME']
+        else:
+            os.environ['HOME'] = self.old_home
+        if self.old_appdata is None:
+            del os.environ['APPDATA']
+        else:
+            os.environ['APPDATA'] = self.old_appdata
+
+    def test_unix_paths_in_home(self):
+        import posixpath
+        config, lib, libdir = ui.default_paths(posixpath)
+        self.assertEqual(config, 'xhome/.beetsconfig')
+        self.assertEqual(lib, 'xhome/.beetsmusic.blb')
+        self.assertEqual(libdir, 'xhome/Music')
+
+    def test_windows_paths_in_home_and_appdata(self):
+        import ntpath
+        config, lib, libdir = ui.default_paths(ntpath)
+        self.assertEqual(config, 'xappdata\\beetsconfig.ini')
+        self.assertEqual(lib, 'xappdata\\beetsmusic.blb')
+        self.assertEqual(libdir, 'xhome\\Music')
+
+class PathFormatTest(unittest.TestCase):
+    def _config(self, text):
+        cp = ConfigParser.SafeConfigParser()
+        cp.readfp(StringIO(text))
+        return cp
+
+    def _paths_for(self, text):
+        return ui._get_path_formats(self._config("[paths]\n%s" %
+                                                 textwrap.dedent(text)))
+
+    def test_default_paths(self):
+        pf = self._paths_for("")
+        self.assertEqual(pf, ui.DEFAULT_PATH_FORMATS)
+
+    def test_custom_paths_prepend(self):
+        pf = self._paths_for("""
+            foo: bar
+        """)
+        self.assertEqual(pf[0], ('foo', 'bar'))
+        self.assertEqual(pf[1:], ui.DEFAULT_PATH_FORMATS)
 
 def suite():
     return unittest.TestLoader().loadTestsFromName(__name__)

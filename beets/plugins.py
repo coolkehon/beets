@@ -1,5 +1,5 @@
 # This file is part of beets.
-# Copyright 2010, Adrian Sampson.
+# Copyright 2011, Adrian Sampson.
 #
 # Permission is hereby granted, free of charge, to any person obtaining
 # a copy of this software and associated documentation files (the
@@ -21,6 +21,9 @@ from collections import defaultdict
 
 PLUGIN_NAMESPACE = 'beetsplug'
 DEFAULT_PLUGINS = []
+
+# Plugins using the Last.fm API can share the same API key.
+LASTFM_KEY = '2dc3914abf35f0d9c92d97d8f8e42b43'
 
 # Global logger.
 log = logging.getLogger('beets')
@@ -52,14 +55,14 @@ class BeetsPlugin(object):
         return 0.0, 0.0
 
     def candidates(self, items):
-        """Should return a sequence of MusicBrainz info dictionaries
-        that match the album whose items are provided.
+        """Should return a sequence of AlbumInfo objects that match the
+        album whose items are provided.
         """
         return ()
 
     def item_candidates(self, item):
-        """Should return a sequence of MusicBrainz track info
-        dictionaries that match the item provided.
+        """Should return a sequence of TrackInfo objects that match the
+        item provided.
         """
         return ()
 
@@ -98,6 +101,36 @@ class BeetsPlugin(object):
             if cls.listeners is None:
                 cls.listeners = defaultdict(list)
             cls.listeners[event].append(func)
+            return func
+        return helper
+
+    template_funcs = None
+    template_fields = None
+
+    @classmethod
+    def template_func(cls, name):
+        """Decorator that registers a path template function. The
+        function will be invoked as ``%name{}`` from path format
+        strings.
+        """
+        def helper(func):
+            if cls.template_funcs is None:
+                cls.template_funcs = {}
+            cls.template_funcs[name] = func
+            return func
+        return helper
+
+    @classmethod
+    def template_field(cls, name):
+        """Decorator that registers a path template field computation.
+        The value will be referenced as ``$name`` from path format
+        strings. The function must accept a single parameter, the Item
+        being formatted.
+        """
+        def helper(func):
+            if cls.template_fields is None:
+                cls.template_fields = {}
+            cls.template_fields[name] = func
             return func
         return helper
 
@@ -191,6 +224,27 @@ def configure(config):
     """Sends the configuration object to each plugin."""
     for plugin in find_plugins():
         plugin.configure(config)
+
+def template_funcs():
+    """Get all the template functions declared by plugins as a
+    dictionary.
+    """
+    funcs = {}
+    for plugin in find_plugins():
+        if plugin.template_funcs:
+            funcs.update(plugin.template_funcs)
+    return funcs
+
+def template_values(item):
+    """Get all the template values computed for a given Item by
+    registered field computations.
+    """
+    values = {}
+    for plugin in find_plugins():
+        if plugin.template_fields:
+            for name, func in plugin.template_fields.iteritems():
+                values[name] = unicode(func(item))
+    return values
 
 
 # Event dispatch.

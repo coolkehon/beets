@@ -21,6 +21,7 @@ import sys
 import os
 import time
 import itertools
+import re
 
 from beets import ui
 from beets.ui import print_, decargs
@@ -28,7 +29,7 @@ from beets import autotag
 import beets.autotag.art
 from beets import plugins
 from beets import importer
-from beets.util import syspath, normpath, ancestry
+from beets.util import syspath, normpath, ancestry, displayable_path
 from beets import library
 
 # Global logger.
@@ -65,11 +66,20 @@ def _do_query(lib, query, album, also_items=True):
     
     return items, albums
 
+FLOAT_EPSILON = 0.01
 def _showdiff(field, oldval, newval, color):
     """Prints out a human-readable field difference line."""
+    # Considering floats incomparable for perfect equality, introduce
+    # an epsilon tolerance.
+    if isinstance(oldval, float) and isinstance(newval, float) and \
+            abs(oldval - newval) < FLOAT_EPSILON:
+        return
+
     if newval != oldval:
         if color:
             oldval, newval = ui.colordiff(oldval, newval)
+        else:
+            oldval, newval = unicode(oldval), unicode(newval)
         print_(u'  %s: %s -> %s' % (field, oldval, newval))
 
 
@@ -87,8 +97,13 @@ DEFAULT_IMPORT_RESUME         = None # "ask"
 DEFAULT_IMPORT_INCREMENTAL    = False
 DEFAULT_THREADED              = True
 DEFAULT_COLOR                 = True
+DEFAULT_IGNORE                = [
+    '.*', '*~',
+]
 
 VARIOUS_ARTISTS = u'Various Artists'
+
+PARTIAL_MATCH_MESSAGE = u'(partial match!)'
 
 # Importer utilities and support.
 
@@ -111,19 +126,35 @@ def show_change(cur_artist, cur_album, items, info, dist, color=True):
     tags are changed from (cur_artist, cur_album, items) to info with
     distance dist.
     """
-    def show_album(artist, album):
+    def show_album(artist, album, partial=False):
         if artist:
-            print_('    %s - %s' % (artist, album))
+            album_description = u'    %s - %s' % (artist, album)
         elif album:
-            print_('    %s' % album)
+            album_description = u'    %s' % album
         else:
-            print_('    (unknown album)')
+            album_description = u'    (unknown album)'
+
+        # Add a suffix if this is a partial match.
+        if partial:
+            warning = PARTIAL_MATCH_MESSAGE
+        else:
+            warning = None
+        if color and warning:
+            warning = ui.colorize('yellow', warning)
+
+        out = album_description
+        if warning:
+            out += u' ' + warning
+        print_(out)
+
+    # Record if the match is partial or not.
+    partial_match = None in items
 
     # Identify the album in question.
-    if cur_artist != info['artist'] or \
-            (cur_album != info['album'] and info['album'] != VARIOUS_ARTISTS):
-        artist_l, artist_r = cur_artist or '', info['artist']
-        album_l,  album_r  = cur_album  or '', info['album']
+    if cur_artist != info.artist or \
+            (cur_album != info.album and info.album != VARIOUS_ARTISTS):
+        artist_l, artist_r = cur_artist or '', info.artist
+        album_l,  album_r  = cur_album  or '', info.album
         if artist_r == VARIOUS_ARTISTS:
             # Hide artists for VA releases.
             artist_l, artist_r = u'', u''
@@ -137,17 +168,27 @@ def show_change(cur_artist, cur_album, items, info, dist, color=True):
         print_("To:")
         show_album(artist_r, album_r)
     else:
-        print_("Tagging: %s - %s" % (info['artist'], info['album']))
+        message = u"Tagging: %s - %s" % (info.artist, info.album)
+        if partial_match:
+            warning = PARTIAL_MATCH_MESSAGE
+            if color:
+                warning = ui.colorize('yellow', PARTIAL_MATCH_MESSAGE)
+            message += u' ' + warning
+        print_(message)
 
     # Distance/similarity.
     print_('(Similarity: %s)' % dist_string(dist, color))
 
     # Tracks.
-    for i, (item, track_data) in enumerate(zip(items, info['tracks'])):
-        cur_track = str(item.track)
-        new_track = str(i+1)
+    missing_tracks = []
+    for i, (item, track_info) in enumerate(zip(items, info.tracks)):
+        if not item:
+            missing_tracks.append((i, track_info))
+            continue
+        cur_track = unicode(item.track)
+        new_track = unicode(i+1)
         cur_title = item.title
-        new_title = track_data['title']
+        new_title = track_info.title
         
         # Possibly colorize changes.
         if color:
@@ -158,23 +199,28 @@ def show_change(cur_artist, cur_album, items, info, dist, color=True):
 
         # Show filename (non-colorized) when title is not set.
         if not item.title.strip():
-            cur_title = os.path.basename(item.path)
+            cur_title = displayable_path(os.path.basename(item.path))
         
         if cur_title != new_title and cur_track != new_track:
-            print_(" * %s (%s) -> %s (%s)" % (
+            print_(u" * %s (%s) -> %s (%s)" % (
                 cur_title, cur_track, new_title, new_track
             ))
         elif cur_title != new_title:
-            print_(" * %s -> %s" % (cur_title, new_title))
+            print_(u" * %s -> %s" % (cur_title, new_title))
         elif cur_track != new_track:
-            print_(" * %s (%s -> %s)" % (item.title, cur_track, new_track))
+            print_(u" * %s (%s -> %s)" % (item.title, cur_track, new_track))
+    for i, track_info in missing_tracks:
+        line = u' * Missing track: %s (%d)' % (track_info.title, i+1)
+        if color:
+            line = ui.colorize('yellow', line)
+        print_(line)
 
 def show_item_change(item, info, dist, color):
     """Print out the change that would occur by tagging `item` with the
     metadata from `info`.
     """
-    cur_artist, new_artist = item.artist, info['artist']
-    cur_title, new_title = item.title, info['title']
+    cur_artist, new_artist = item.artist, info.artist
+    cur_title, new_title = item.title, info.title
 
     if cur_artist != new_artist or cur_title != new_title:
         if color:
@@ -218,7 +264,7 @@ def choose_candidate(candidates, singleton, rec, color, timid,
 
     Returns the result of the choice, which may SKIP, ASIS, TRACKS, or
     MANUAL or a candidate. For albums, a candidate is a `(info, items)`
-    pair; for items, it is just an `info` dictionary.
+    pair; for items, it is just a TrackInfo object.
     """
     # Sanity check.
     if singleton:
@@ -271,22 +317,21 @@ def choose_candidate(candidates, singleton, rec, color, timid,
                        (item.artist, item.title))
                 print_('Candidates:')
                 for i, (dist, info) in enumerate(candidates):
-                    print_('%i. %s - %s (%s)' % (i+1, info['artist'],
-                           info['title'], dist_string(dist, color)))
+                    print_('%i. %s - %s (%s)' % (i+1, info.artist,
+                           info.title, dist_string(dist, color)))
             else:
                 print_('Finding tags for album "%s - %s".' %
                        (cur_artist, cur_album))
                 print_('Candidates:')
                 for i, (dist, items, info) in enumerate(candidates):
-                    line = '%i. %s - %s' % (i+1, info['artist'],
-                                            info['album'])
+                    line = '%i. %s - %s' % (i+1, info.artist, info.album)
 
                     # Label and year disambiguation, if available.
                     label, year = None, None
-                    if 'label' in info:
-                        label = info['label']
-                    if 'year' in info and info['year']:
-                        year = unicode(info['year'])
+                    if info.label:
+                        label = info.label
+                    if info.year:
+                        year = unicode(info.year)
                     if label and year:
                         line += u' [%s, %s]' % (label, year)
                     elif label:
@@ -295,6 +340,14 @@ def choose_candidate(candidates, singleton, rec, color, timid,
                         line += u' [%s]' % year
 
                     line += ' (%s)' % dist_string(dist, color)
+
+                    # Point out the partial matches.
+                    if None in items:
+                        warning = PARTIAL_MATCH_MESSAGE
+                        if color:
+                            warning = ui.colorize('yellow', warning)
+                        line += u' %s' % warning
+
                     print_(line)
                                             
             # Ask the user for a choice.
@@ -378,10 +431,20 @@ def manual_search(singleton):
     return artist.strip(), name.strip()
 
 def manual_id(singleton):
-    """Input a MusicBrainz ID, either for an album or a track.
+    """Input a MusicBrainz ID, either for an album ("release") or a
+    track ("recording"). If no valid ID is entered, returns None.
     """
-    prompt = 'Enter MusicBrainz %s ID: ' % ('track' if singleton else 'album')
-    return raw_input(prompt).decode(sys.stdin.encoding).strip()
+    prompt = 'Enter MusicBrainz %s ID: ' % \
+             ('recording' if singleton else 'release')
+    entry = raw_input(prompt).decode(sys.stdin.encoding).strip()
+
+    # Find the first thing that looks like a UUID/MBID.
+    match = re.search('[a-f0-9]{8}(-[a-f0-9]{4}){3}-[a-f0-9]{12}', entry)
+    if match:
+       return match.group()
+    else:
+        log.error('Invalid MBID.')
+        return None
 
 def choose_match(task, config):
     """Given an initial autotagging of items, go through an interactive
@@ -427,12 +490,13 @@ def choose_match(task, config):
         elif choice is importer.action.MANUAL_ID:
             # Try a manually-entered ID.
             search_id = manual_id(False)
-            try:
-                _, _, candidates, rec = \
-                    autotag.tag_album(task.items, config.timid,
-                                      search_id=search_id)
-            except autotag.AutotagError:
-                candidates, rec = None, None
+            if search_id:
+                try:
+                    _, _, candidates, rec = \
+                        autotag.tag_album(task.items, config.timid,
+                                        search_id=search_id)
+                except autotag.AutotagError:
+                    candidates, rec = None, None
         else:
             # We have a candidate! Finish tagging. Here, choice is
             # an (info, items) pair as desired.
@@ -441,7 +505,7 @@ def choose_match(task, config):
 
 def choose_item(task, config):
     """Ask the user for a choice about tagging a single item. Returns
-    either an action constant or a track info dictionary.
+    either an action constant or a TrackInfo object.
     """
     print_()
     print_(task.item.path)
@@ -473,8 +537,9 @@ def choose_item(task, config):
         elif choice == importer.action.MANUAL_ID:
             # Ask for a track ID.
             search_id = manual_id(True)
-            candidates, rec = autotag.tag_item(task.item, config.timid,
-                                               search_id=search_id)
+            if search_id:
+                candidates, rec = autotag.tag_item(task.item, config.timid,
+                                                search_id=search_id)
         else:
             # Chose a candidate.
             assert not isinstance(choice, importer.action)
@@ -484,7 +549,7 @@ def choose_item(task, config):
 
 def import_files(lib, paths, copy, write, autot, logpath, art, threaded,
                  color, delete, quiet, resume, quiet_fallback, singletons,
-                 timid, query, incremental):
+                 timid, query, incremental, ignore):
     """Import the files in the given list of paths, tagging each leaf
     directory as an album. If copy, then the files are copied into
     the library folder. If write, then new metadata is written to the
@@ -546,6 +611,7 @@ def import_files(lib, paths, copy, write, autot, logpath, art, threaded,
         choose_item_func = choose_item,
         query = query,
         incremental = incremental,
+        ignore = ignore,
     )
     
     # If we were logging, close the file.
@@ -619,6 +685,7 @@ def import_func(lib, config, opts, args):
     incremental = opts.incremental if opts.incremental is not None else \
         ui.config_val(config, 'beets', 'import_incremental',
             DEFAULT_IMPORT_INCREMENTAL, bool)
+    ignore = ui.config_val(config, 'beets', 'ignore', DEFAULT_IGNORE, list)
 
     # Resume has three options: yes, no, and "ask" (None).
     resume = opts.resume if opts.resume is not None else \
@@ -645,7 +712,7 @@ def import_func(lib, config, opts, args):
 
     import_files(lib, paths, copy, write, autot, logpath, art, threaded,
                  color, delete, quiet, resume, quiet_fallback, singletons,
-                 timid, query, incremental)
+                 timid, query, incremental, ignore)
 import_cmd.func = import_func
 default_commands.append(import_cmd)
 
@@ -683,7 +750,7 @@ default_commands.append(list_cmd)
 
 # update: Update library contents according to on-disk tags.
 
-def update_items(lib, query, album, move, color):
+def update_items(lib, query, album, move, color, pretend):
     """For all the items matched by the query, update the library to
     reflect the item's embedded tags.
     """
@@ -695,13 +762,28 @@ def update_items(lib, query, album, move, color):
         # Item deleted?
         if not os.path.exists(syspath(item.path)):
             print_(u'X %s - %s' % (item.artist, item.title))
-            lib.remove(item, True)
+            if not pretend:
+                lib.remove(item, True)
             affected_albums.add(item.album_id)
+            continue
+
+        # Did the item change since last checked?
+        if item.current_mtime() <= item.mtime:
+            log.debug(u'skipping %s because mtime is up to date (%i)' %
+                      (displayable_path(item.path), item.mtime))
             continue
 
         # Read new data.
         old_data = dict(item.record)
         item.read()
+
+        # Special-case album artist when it matches track artist. (Hacky
+        # but necessary for preserving album-level metadata for non-
+        # autotagged imports.)
+        if not item.albumartist and \
+                old_data['albumartist'] == old_data['artist'] == item.artist:
+            item.albumartist = old_data['albumartist']
+            item.dirty['albumartist'] = False
 
         # Get and save metadata changes.
         changes = {}
@@ -714,12 +796,26 @@ def update_items(lib, query, album, move, color):
             for key, (oldval, newval) in changes.iteritems():
                 _showdiff(key, oldval, newval, color)
 
+            # If we're just pretending, then don't move or save.
+            if pretend:
+                continue
+
             # Move the item if it's in the library.
             if move and lib.directory in ancestry(item.path):
-                item.move(lib)
+                lib.move(item)
 
             lib.store(item)
             affected_albums.add(item.album_id)
+        elif not pretend:
+            # The file's mtime was different, but there were no changes
+            # to the metadata. Store the new mtime, which is set in the
+            # call to read(), so we don't check this again in the
+            # future.
+            lib.store(item)
+
+    # Skip album changes while pretending.
+    if pretend:
+        return
 
     # Modify affected albums to reflect changes in their items.
     for album_id in affected_albums:
@@ -748,9 +844,11 @@ update_cmd.parser.add_option('-a', '--album', action='store_true',
     help='show matching albums instead of tracks')
 update_cmd.parser.add_option('-M', '--nomove', action='store_false',
     default=True, dest='move', help="don't move files in library")
+update_cmd.parser.add_option('-p', '--pretend', action='store_true',
+    help="show all changes but do nothing")
 def update_func(lib, config, opts, args):
     color = ui.config_val(config, 'beets', 'color', DEFAULT_COLOR, bool)
-    update_items(lib, decargs(args), opts.album, opts.move, color)
+    update_items(lib, decargs(args), opts.album, opts.move, color, opts.pretend)
 update_cmd.func = update_func
 default_commands.append(update_cmd)
 
@@ -909,7 +1007,7 @@ def modify_items(lib, mods, query, write, move, album, color, confirm):
                 if album:
                     obj.move()
                 else:
-                    obj.move(lib)
+                    lib.move(obj)
 
         # When modifying items, we have to store them to the database.
         if not album:
@@ -971,7 +1069,7 @@ def move_items(lib, dest, query, copy, album):
         if album:
             obj.move(copy, basedir=dest)
         else:
-            obj.move(lib, copy, basedir=dest)
+            lib.move(obj, copy, basedir=dest)
             lib.store(obj)
     lib.save()
 

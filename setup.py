@@ -15,14 +15,34 @@
 # included in all copies or substantial portions of the Software.
 
 import os
+import sys
+import subprocess
+import shutil
 from setuptools import setup
 
 def _read(fn):
     path = os.path.join(os.path.dirname(__file__), fn)
     return open(path).read()
 
+# Build manpages if we're making a source distribution tarball.
+if 'sdist' in sys.argv:
+    # Go into the docs directory and build the manpage.
+    docdir = os.path.join(os.path.dirname(__file__), 'docs')
+    curdir = os.getcwd()
+    os.chdir(docdir)
+    try:
+        subprocess.check_call(['make', 'man'])
+    finally:
+        os.chdir(curdir)
+
+    # Copy resulting manpages.
+    mandir = os.path.join(os.path.dirname(__file__), 'man')
+    if os.path.exists(mandir):
+        shutil.rmtree(mandir)
+    shutil.copytree(os.path.join(docdir, '_build', 'man'), mandir)
+
 setup(name='beets',
-      version='1.0b10',
+      version='1.0b12',
       description='music tagger and library organizer',
       author='Adrian Sampson',
       author_email='adrian@radbox.org',
@@ -31,6 +51,7 @@ setup(name='beets',
       platforms='ALL',
       long_description=_read('README.rst'),
       test_suite='test.testall.suite',
+      include_package_data=True, # Install plugin resources.
 
       packages=[
           'beets',
@@ -39,6 +60,8 @@ setup(name='beets',
           'beets.util',
           'beetsplug',
           'beetsplug.bpd',
+          'beetsplug.web',
+          'beetsplug.lastgenre',
       ],
       namespace_packages=['beetsplug'],
       entry_points={
@@ -49,9 +72,9 @@ setup(name='beets',
 
       install_requires=[
           'mutagen',
-          'python-musicbrainz2 >= 0.7.2',
           'munkres',
           'unidecode',
+          'musicbrainzngs',
       ],
 
       classifiers=[

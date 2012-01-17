@@ -16,12 +16,14 @@ import sqlite3
 import os
 import re
 import sys
-from string import Template
 import logging
+import shlex
+from unidecode import unidecode
 from beets.mediafile import MediaFile
 from beets import plugins
 from beets import util
 from beets.util import bytestring_path, syspath, normpath, samefile
+from beets.util.functemplate import Template
 
 MAX_FILENAME_LENGTH = 200
 
@@ -66,6 +68,7 @@ ITEM_FIELDS = [
     ('length',      'real', False, True),
     ('bitrate',     'int',  False, True),
     ('format',      'text', False, True),
+    ('mtime',       'int',  False, False),
 ]
 ITEM_KEYS_WRITABLE = [f[0] for f in ITEM_FIELDS if f[3] and f[2]]
 ITEM_KEYS_META     = [f[0] for f in ITEM_FIELDS if f[3]]
@@ -101,6 +104,9 @@ ALBUM_DEFAULT_FIELDS = ('album', 'albumartist', 'genre')
 ITEM_DEFAULT_FIELDS = ARTIST_DEFAULT_FIELDS + ALBUM_DEFAULT_FIELDS + \
     ('title', 'comments')
 
+# Special path format key.
+PF_KEY_DEFAULT = 'default'
+
 # Logger.
 log = logging.getLogger('beets')
 if not log.handlers:
@@ -130,6 +136,7 @@ class Item(object):
             'album_id': None,
         })
         i.read(path)
+        i.mtime = i.current_mtime() # Initial mtime.
         return i
 
     def _fill_record(self, values):
@@ -176,10 +183,12 @@ class Item(object):
                 value = str(value)
 
         if key in ITEM_KEYS:
+            # If the value changed, mark the field as dirty.
             if (not (key in self.record)) or (self.record[key] != value):
-                # don't dirty if value unchanged
                 self.record[key] = value
                 self.dirty[key] = True
+                if key in ITEM_KEYS_WRITABLE:
+                    self.mtime = 0 # Reset mtime on dirty.
         else:
             super(Item, self).__setattr__(key, value)
     
@@ -199,59 +208,46 @@ class Item(object):
         for key in ITEM_KEYS_META:
             setattr(self, key, getattr(f, key))
         self.path = read_path
+
+        # Database's mtime should now reflect the on-disk value.
+        if read_path == self.path:
+            self.mtime = self.current_mtime()
     
     def write(self):
         """Writes the item's metadata to the associated file.
         """
         f = MediaFile(syspath(self.path))
+        plugins.send('write', item=self, mf=f)
         for key in ITEM_KEYS_WRITABLE:
             setattr(f, key, getattr(self, key))
         f.save()
-    
-    
-    # Dealing with files themselves.
-    
-    def move(self, library, copy=False, in_album=False, basedir=None):
-        """Move the item to its designated location within the library
-        directory (provided by destination()). Subdirectories are
-        created as needed. If the operation succeeds, the item's path
-        field is updated to reflect the new location.
-        
-        If copy is True, moving the file is copied rather than moved.
-        
-        If in_album is True, then the track is treated as part of an
-        album even if it does not yet have an album_id associated with
-        it. (This allows items to be moved before they are added to the
-        database, a performance optimization.)
 
-        basedir overrides the library base directory for the
-        destination.
+        # The file has a new mtime.
+        self.mtime = self.current_mtime()
 
-        Passes on appropriate exceptions if directories cannot be
-        created or moving/copying fails.
-        
-        Note that one should almost certainly call store() and
-        library.save() after this method in order to keep on-disk data
-        consistent.
+
+    # Files themselves.
+
+    def move(self, dest, copy=False):
+        """Moves or copies the item's file, updating the path value if
+        the move succeeds. If a file exists at ``dest``, then it is
+        slightly modified to be unique.
         """
-        dest = library.destination(self, in_album=in_album, basedir=basedir)
-        
-        # Create necessary ancestry for the move.
-        util.mkdirall(dest)
-        
-        if not samefile(self.path, dest):
-            if copy:
-                util.copy(self.path, dest)
-            else:
-                util.move(self.path, dest)
+        if not util.samefile(self.path, dest):
+            dest = util.unique_path(dest)
+        if copy:
+            util.copy(self.path, dest)
+        else:
+            util.move(self.path, dest)
             
         # Either copying or moving succeeded, so update the stored path.
-        old_path = self.path
         self.path = dest
 
-        # Prune vacated directory.
-        if not copy:
-            util.prune_dirs(os.path.dirname(old_path), library.directory)
+    def current_mtime(self):
+        """Returns the current mtime of the file, rounded to the nearest
+        integer.
+        """
+        return int(os.path.getmtime(syspath(self.path)))
 
 
 # Library queries.
@@ -292,16 +288,6 @@ class Query(object):
         c.close()
         return (result[0], result[1] or 0.0)
 
-    def execute(self, library):
-        """Runs the query in the specified library, returning a
-        ResultIterator.
-        """
-        c = library.conn.cursor()
-        stmt, subs = self.statement()
-        log.debug('Executing query: %s' % stmt)
-        c.execute(stmt, subs)
-        return ResultIterator(c, library)
-
 class FieldQuery(Query):
     """An abstract query that searches in a specific field for a
     pattern.
@@ -333,7 +319,8 @@ class SubstringQuery(FieldQuery):
         return clause, subvals
 
     def match(self, item):
-        return self.pattern.lower() in getattr(item, self.field).lower()
+        value = getattr(item, self.field) or ''
+        return self.pattern.lower() in value.lower()
 
 class BooleanQuery(MatchQuery):
     """Matches a boolean field. Pattern should either be a boolean or a
@@ -369,8 +356,8 @@ class CollectionQuery(Query):
     # is there a better way to do this?
     def __len__(self): return len(self.subqueries)
     def __getitem__(self, key): return self.subqueries[key]
-    def __iter__(self): iter(self.subqueries)
-    def __contains__(self, item): item in self.subqueries
+    def __iter__(self): return iter(self.subqueries)
+    def __contains__(self, item): return item in self.subqueries
 
     def clause_with_joiner(self, joiner):
         """Returns a clause created by joining together the clauses of
@@ -425,7 +412,7 @@ class CollectionQuery(Query):
                 continue
             key, pattern = res
             if key is None: # No key specified.
-                if os.sep in pattern:
+                if os.sep in pattern and 'path' in all_keys:
                     # This looks like a path.
                     subqueries.append(PathQuery(pattern))
                 else:
@@ -434,7 +421,7 @@ class CollectionQuery(Query):
                                                         default_fields))
             elif key.lower() == 'comp': # a boolean field
                 subqueries.append(BooleanQuery(key.lower(), pattern))
-            elif key.lower() == 'path':
+            elif key.lower() == 'path' and 'path' in all_keys:
                 subqueries.append(PathQuery(pattern))
             elif key.lower() in all_keys: # ignore unrecognized keys
                 subqueries.append(SubstringQuery(key.lower(), pattern))
@@ -443,6 +430,13 @@ class CollectionQuery(Query):
         if not subqueries: # no terms in query
             subqueries = [TrueQuery()]
         return cls(subqueries)
+
+    @classmethod
+    def from_string(cls, query, default_fields=None, all_keys=ITEM_KEYS):
+        """Creates a query based on a single string. The string is split
+        into query parts using shell-style syntax.
+        """
+        return cls.from_strings(shlex.split(query))
 
 class AnySubstringQuery(CollectionQuery):
     """A query that matches a substring in any of a list of metadata
@@ -498,6 +492,14 @@ class TrueQuery(Query):
     def match(self, item):
         return True
 
+class FalseQuery(Query):
+    """A query that never matches."""
+    def clause(self):
+        return '0', ()
+
+    def match(self, item):
+        return False
+
 class PathQuery(Query):
     """A query that matches all items under a given path."""
     def __init__(self, path):
@@ -516,27 +518,22 @@ class PathQuery(Query):
         return '(path = ?) || (path LIKE ?)', (file_blob, dir_pat)
 
 class ResultIterator(object):
-    """An iterator into an item query result set."""
+    """An iterator into an item query result set. The iterator eagerly
+    fetches all of the results from the cursor but lazily constructs
+    Item objects that reflect them.
+    """
+    def __init__(self, cursor):
+        # Fetch all of the rows, closing the cursor (and unlocking the
+        # database).
+        self.rows = cursor.fetchall()
+        self.rowiter = iter(self.rows)
     
-    def __init__(self, cursor, library):
-        self.cursor = cursor
-        self.library = library
-    
-    def __iter__(self): return self
+    def __iter__(self):
+        return self
     
     def next(self):
-        try:
-            row = self.cursor.next()
-        except StopIteration:
-            self.cursor.close()
-            raise
+        row = self.rowiter.next() # May raise StopIteration.
         return Item(row)
-
-    def close(self):
-        self.cursor.close()
-
-    def __del__(self):
-        self.close()
 
 
 # An abstract library.
@@ -726,8 +723,11 @@ class Library(BaseLibrary):
     """A music library using an SQLite database as a metadata store."""
     def __init__(self, path='library.blb',
                        directory='~/Music',
-                       path_formats=None,
+                       path_formats=((PF_KEY_DEFAULT,
+                                      '$artist/$album/$track $title'),),
                        art_filename='cover',
+                       timeout=5.0,
+                       replacements=None,
                        item_fields=ITEM_FIELDS,
                        album_fields=ALBUM_FIELDS):
         if path == ':memory:':
@@ -735,14 +735,12 @@ class Library(BaseLibrary):
         else:
             self.path = bytestring_path(normpath(path))
         self.directory = bytestring_path(normpath(directory))
-        if path_formats is None:
-            path_formats = {'default': '$artist/$album/$track $title'}
-        elif isinstance(path_formats, basestring):
-            path_formats = {'default': path_formats}
         self.path_formats = path_formats
         self.art_filename = bytestring_path(art_filename)
+        self.replacements = replacements
         
-        self.conn = sqlite3.connect(self.path)
+        self.timeout = timeout
+        self.conn = sqlite3.connect(self.path, timeout)
         self.conn.row_factory = sqlite3.Row
             # this way we can access our SELECT results like dictionaries
         
@@ -804,19 +802,31 @@ class Library(BaseLibrary):
         """
         pathmod = pathmod or os.path
         
-        # Use a path format based on the album type, if available.
-        if not item.album_id and not in_album:
-            # Singleton track. Never use the "album" formats.
-            if 'singleton' in self.path_formats:
-                path_format = self.path_formats['singleton']
-            else:
-                path_format = self.path_formats['default']
-        elif item.albumtype and item.albumtype in self.path_formats:
-            path_format = self.path_formats[item.albumtype]
-        elif item.comp and 'comp' in self.path_formats:
-            path_format = self.path_formats['comp']
+        # Use a path format based on a query, falling back on the
+        # default.
+        for query, path_format in self.path_formats:
+            if query == PF_KEY_DEFAULT:
+                continue
+            query = AndQuery.from_string(query)
+            if in_album:
+                # If we're treating this item as a member of the item,
+                # hack the query so that singleton queries always
+                # observe the item to be non-singleton.
+                for i, subquery in enumerate(query):
+                    if isinstance(subquery, SingletonQuery):
+                        query[i] = FalseQuery() if subquery.sense \
+                                   else TrueQuery()
+            if query.match(item):
+                # The query matches the item! Use the corresponding path
+                # format.
+                break
         else:
-            path_format = self.path_formats['default']
+            # No query matched; fall back to default.
+            for query, path_format in self.path_formats:
+                if query == PF_KEY_DEFAULT:
+                    break
+            else:
+                assert False, "no default path format"
         subpath_tmpl = Template(path_format)
         
         # Get the item's Album if it has one.
@@ -843,7 +853,10 @@ class Library(BaseLibrary):
             mapping['albumartist'] = mapping['artist']
         
         # Perform substitution.
-        subpath = subpath_tmpl.substitute(mapping)
+        mapping.update(plugins.template_values(item))
+        funcs = dict(TEMPLATE_FUNCTIONS)
+        funcs.update(plugins.template_funcs())
+        subpath = subpath_tmpl.substitute(mapping, funcs)
         
         # Encode for the filesystem, dropping unencodable characters.
         if isinstance(subpath, unicode) and not fragment:
@@ -851,7 +864,7 @@ class Library(BaseLibrary):
             subpath = subpath.encode(encoding, 'replace')
         
         # Truncate components and remove forbidden characters.
-        subpath = util.sanitize_path(subpath)
+        subpath = util.sanitize_path(subpath, pathmod, self.replacements)
         
         # Preserve extension.
         _, extension = pathmod.splitext(item.path)
@@ -864,13 +877,13 @@ class Library(BaseLibrary):
             return normpath(os.path.join(basedir, subpath))   
 
 
-    # Main interface.
+    # Item manipulation.
 
     def add(self, item, copy=False):
         #FIXME make a deep copy of the item?
         item.library = self
         if copy:
-            item.move(self, copy=True)
+            self.move(item, copy=True)
 
         # build essential parts of query
         columns = ','.join([key for key in ITEM_KEYS if key != 'id'])
@@ -962,6 +975,53 @@ class Library(BaseLibrary):
         if delete:
             util.soft_remove(item.path)
             util.prune_dirs(os.path.dirname(item.path), self.directory)
+    
+    def move(self, item, copy=False, in_album=False, basedir=None,
+             with_album=True):
+        """Move the item to its designated location within the library
+        directory (provided by destination()). Subdirectories are
+        created as needed. If the operation succeeds, the item's path
+        field is updated to reflect the new location.
+        
+        If copy is True, moving the file is copied rather than moved.
+        
+        If in_album is True, then the track is treated as part of an
+        album even if it does not yet have an album_id associated with
+        it. (This allows items to be moved before they are added to the
+        database, a performance optimization.)
+
+        basedir overrides the library base directory for the
+        destination.
+
+        If the item is in an album, the album is given an opportunity to
+        move its art. (This can be disabled by passing
+        with_album=False.)
+        
+        The item is stored to the database if it is in the database, so
+        any dirty fields prior to the move() call will be written as a
+        side effect. You probably want to call save() to commit the DB
+        transaction.
+        """
+        dest = self.destination(item, in_album=in_album, basedir=basedir)
+        
+        # Create necessary ancestry for the move.
+        util.mkdirall(dest)
+        
+        # Perform the move and store the change.
+        old_path = item.path
+        item.move(dest, copy)
+        if item.id is not None:
+            self.store(item)
+
+        # If this item is in an album, move its art.
+        if with_album:
+            album = self.get_album(item)
+            if album:
+                album.move_art(copy)
+
+        # Prune vacated directory.
+        if not copy:
+            util.prune_dirs(os.path.dirname(old_path), self.directory)
 
 
     # Querying.
@@ -994,7 +1054,7 @@ class Library(BaseLibrary):
               " ORDER BY artist, album, disc, track"
         log.debug('Getting items with SQL: %s' % sql)
         c = self.conn.execute(sql, subvals)
-        return ResultIterator(c, self)
+        return ResultIterator(c)
 
 
     # Convenience accessors.
@@ -1003,13 +1063,11 @@ class Library(BaseLibrary):
         """Fetch an Item by its ID. Returns None if no match is found.
         """
         c = self.conn.execute("SELECT * FROM items WHERE id=?", (id,))
-        it = ResultIterator(c, self)
+        it = ResultIterator(c)
         try:
             return it.next()
         except StopIteration:
             return None
-        finally:
-            it.close()
     
     def get_album(self, item_or_id):
         """Given an album ID or an item associated with an album,
@@ -1130,7 +1188,7 @@ class Album(BaseAlbum):
             'SELECT * FROM items WHERE album_id=?',
             (self.id,)
         )
-        return ResultIterator(c, self._library)
+        return ResultIterator(c)
 
     def remove(self, delete=False, with_items=True):
         """Removes this album and all its associated items from the
@@ -1156,37 +1214,44 @@ class Album(BaseAlbum):
             (self.id,)
         )
 
+    def move_art(self, copy=False):
+        """Move or copy any existing album art so that it remains in the
+        same directory as the items.
+        """
+        old_art = self.artpath
+        if not old_art:
+            return
+
+        new_art = self.art_destination(old_art)
+        if new_art == old_art:
+            return
+
+        log.debug('moving album art %s to %s' % (old_art, new_art))
+        if copy:
+            util.copy(old_art, new_art)
+        else:
+            util.move(old_art, new_art)
+        self.artpath = new_art
+
+        # Prune old path when moving.
+        if not copy: 
+            util.prune_dirs(os.path.dirname(old_art),
+                            self._library.directory)
+
     def move(self, copy=False, basedir=None):
-        """Moves (or copies) all items to their destination. Any
-        album art moves along with them. basedir overrides the library
-        base directory for the destination.
+        """Moves (or copies) all items to their destination.  Any album
+        art moves along with them. basedir overrides the library base
+        directory for the destination.
         """
         basedir = basedir or self._library.directory
 
         # Move items.
         items = list(self.items())
         for item in items:
-            item.move(self._library, copy, basedir=basedir)
-        newdir = os.path.dirname(items[0].path)
+            self._library.move(item, copy, basedir=basedir, with_album=False)
 
         # Move art.
-        old_art = self.artpath
-        if old_art:
-            new_art = self.art_destination(old_art, newdir)
-            if new_art != old_art:
-                if copy:
-                    util.copy(old_art, new_art)
-                else:
-                    util.move(old_art, new_art)
-                self.artpath = new_art
-            if not copy: # Prune old path.
-                util.prune_dirs(os.path.dirname(old_art),
-                                self._library.directory)
-
-        # Store new item paths. We do this at the end to avoid
-        # locking the database for too long while files are copied.
-        for item in items:
-            self._library.store(item)
+        self.move_art(copy)
 
     def item_dir(self):
         """Returns the directory containing the album's first item,
@@ -1232,5 +1297,56 @@ class Album(BaseAlbum):
         # Normal operation.
         if oldart == artdest:
             util.soft_remove(oldart)
+        artdest = util.unique_path(artdest)
         util.copy(path, artdest)
         self.artpath = artdest
+
+
+# Default path template resources.
+
+def _int_arg(s):
+    """Convert a string argument to an integer for use in a template
+    function.  May raise a ValueError.
+    """
+    return int(s.strip())
+def _tmpl_lower(s):
+    """Convert a string to lower case."""
+    return s.lower()
+def _tmpl_upper(s):
+    """Covert a string to upper case."""
+    return s.upper()
+def _tmpl_title(s):
+    """Convert a string to title case."""
+    return s.title()
+def _tmpl_left(s, chars):
+    """Get the leftmost characters of a string."""
+    return s[0:_int_arg(chars)]
+def _tmpl_right(s, chars):
+    """Get the rightmost characters of a string."""
+    return s[-_int_arg(chars):]
+def _tmpl_if(condition, trueval, falseval=u''):
+    """If ``condition`` is nonempty and nonzero, emit ``trueval``;
+    otherwise, emit ``falseval`` (if provided).
+    """
+    try:
+        condition = _int_arg(condition)
+    except ValueError:
+        condition = condition.strip()
+    if condition:
+        return trueval
+    else:
+        return falseval
+def _tmpl_asciify(s):
+    """Translate non-ASCII characters to their ASCII equivalents.
+    """
+    return unidecode(s)
+
+TEMPLATE_FUNCTIONS = {
+    'lower': _tmpl_lower,
+    'upper': _tmpl_upper,
+    'title': _tmpl_title,
+    'left': _tmpl_left,
+    'right': _tmpl_right,
+    'if': _tmpl_if,
+    'asciify': _tmpl_asciify,
+}

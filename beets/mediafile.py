@@ -94,7 +94,7 @@ def _safe_cast(out_type, val):
             if not isinstance(val, basestring):
                 val = unicode(val)
             # Get a number from the front of the string.
-            val = re.match('[0-9]*', val.strip()).group(0)
+            val = re.match(r'[0-9]*', val.strip()).group(0)
             if not val:
                 return 0
             else:
@@ -115,6 +115,20 @@ def _safe_cast(out_type, val):
             return u''
         else:
             return unicode(val)
+
+    elif out_type == float:
+        if val is None:
+            return 0.0
+        elif isinstance(val, int) or isinstance(val, float):
+            return float(val)
+        else:
+            if not isinstance(val, basestring):
+                val = unicode(val)
+            val = re.match(r'[\+-]?[0-9\.]*', val.strip()).group(0)
+            if not val:
+                return 0.0
+            else:
+                return float(val)
 
     else:
         return val
@@ -275,7 +289,7 @@ class MediaField(object):
                 frames = obj.mgfile.tags.getall(style.key)
                 entry = None
                 for frame in frames:
-                    if frame.desc == style.id3_desc:
+                    if frame.desc.lower() == style.id3_desc.lower():
                         entry = getattr(frame, style.id3_frame_field)
                         break
                 if entry is None: # no desc match
@@ -321,7 +335,7 @@ class MediaField(object):
                 # try modifying in place
                 found = False
                 for frame in frames:
-                    if frame.desc == style.id3_desc:
+                    if frame.desc.lower() == style.id3_desc.lower():
                         setattr(frame, style.id3_frame_field, out)
                         found = True
                         break
@@ -380,19 +394,22 @@ class MediaField(object):
         """
         # Fetch the data using the various StorageStyles.
         styles = self._styles(obj)
-        for style in styles:
-            # Use the first style that returns a reasonable value.
-            out = self._fetchdata(obj, style)
-            if out:
-                break
+        if styles is None:
+            out = None
+        else:
+            for style in styles:
+                # Use the first style that returns a reasonable value.
+                out = self._fetchdata(obj, style)
+                if out:
+                    break
         
-        if style.packing:
-            out = Packed(out, style.packing)[style.pack_pos]
+            if style.packing:
+                out = Packed(out, style.packing)[style.pack_pos]
 
-        # MPEG-4 freeform frames are (should be?) encoded as UTF-8.
-        if obj.type == 'mp4' and style.key.startswith('----:') and \
-                isinstance(out, str):
-            out = out.decode('utf8')
+            # MPEG-4 freeform frames are (should be?) encoded as UTF-8.
+            if obj.type == 'mp4' and style.key.startswith('----:') and \
+                    isinstance(out, str):
+                out = out.decode('utf8')
         
         return _safe_cast(self.out_type, out)
     
@@ -401,6 +418,9 @@ class MediaField(object):
         """
         # Store using every StorageStyle available.
         styles = self._styles(obj)
+        if styles is None:
+            return
+
         for style in styles:
         
             if style.packing:
@@ -611,6 +631,30 @@ class ImageField(object):
                 obj.mgfile['metadata_block_picture'] = [
                     base64.b64encode(pic.write())
                 ]
+
+class FloatValueField(MediaField):
+    """A field that stores a floating-point number as a string."""
+    def __init__(self, places=2, suffix=None, **kwargs):
+        """Make a field that stores ``places`` digits after the decimal
+        point and appends ``suffix`` (if specified) when encoding as a
+        string.
+        """
+        super(FloatValueField, self).__init__(unicode, **kwargs)
+
+        fmt = ['%.', str(places), 'f']
+        if suffix:
+            fmt += [' ', suffix]
+        self.fmt = ''.join(fmt)
+
+    def __get__(self, obj, owner):
+        valstr = super(FloatValueField, self).__get__(obj, owner)
+        return _safe_cast(float, valstr)
+
+    def __set__(self, obj, val):
+        if not val:
+            val = 0.0
+        valstr = self.fmt % val
+        super(FloatValueField, self).__set__(obj, valstr)
 
 
 # The file (a collection of fields).
@@ -863,6 +907,32 @@ class MediaFile(object):
                     '----:com.apple.iTunes:MusicBrainz Album Artist Id',
                     as_type=str),
                 etc = StorageStyle('musicbrainz_albumartistid')
+            )
+
+    # ReplayGain fields.
+    rg_track_gain = FloatValueField(2, 'dB',
+                mp3 = StorageStyle('TXXX',
+                                   id3_desc=u'REPLAYGAIN_TRACK_GAIN'),
+                mp4 = None,
+                etc = StorageStyle(u'REPLAYGAIN_TRACK_GAIN')
+            )
+    rg_album_gain = FloatValueField(2, 'dB',
+                mp3 = StorageStyle('TXXX',
+                                   id3_desc=u'REPLAYGAIN_ALBUM_GAIN'),
+                mp4 = None,
+                etc = StorageStyle(u'REPLAYGAIN_ALBUM_GAIN')
+            )
+    rg_track_peak = FloatValueField(6, None,
+                mp3 = StorageStyle('TXXX',
+                                   id3_desc=u'REPLAYGAIN_TRACK_PEAK'),
+                mp4 = None,
+                etc = StorageStyle(u'REPLAYGAIN_TRACK_PEAK')
+            )
+    rg_album_peak = FloatValueField(6, None,
+                mp3 = StorageStyle('TXXX',
+                                   id3_desc=u'REPLAYGAIN_ALBUM_PEAK'),
+                mp4 = None,
+                etc = StorageStyle(u'REPLAYGAIN_ALBUM_PEAK')
             )
 
     @property
