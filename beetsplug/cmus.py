@@ -58,7 +58,7 @@ def cmus_remote(lib, config, opts, args):
         subprocess.call(cmd + ['--clear'] + cmd_args)
     
     if opts.add:
-        for item in lib.items( ui.make_query(args)):
+        for item in lib.items( args ):
             subprocess.call(cmd + cmd_args + [item.path])
 
     if opts.stop:
