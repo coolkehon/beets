@@ -4,6 +4,15 @@ ReplayGain Plugin
 This plugin adds support for `ReplayGain`_, a technique for normalizing audio
 playback levels.
 
+.. warning::
+
+    Some users have reported problems with the Gstreamer ReplayGain calculation
+    plugin. If you experience segmentation faults or random hangs with this
+    plugin enabled, consider disabling it. (Please `file a bug`_ if you can get
+    a gdb traceback for such a segfault or hang.)
+
+    .. _file a bug: http://code.google.com/p/beets/issues/entry
+
 Installation
 ------------
 

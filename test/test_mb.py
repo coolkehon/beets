@@ -14,9 +14,7 @@
 
 """Tests for MusicBrainz API wrapper.
 """
-import unittest
-
-import _common
+from _common import unittest
 from beets.autotag import mb
 
 class MBAlbumInfoTest(unittest.TestCase):
@@ -35,8 +33,15 @@ class MBAlbumInfoTest(unittest.TestCase):
             'medium-list': [],
         }
         if tracks:
+            track_list = []
+            for i, track in enumerate(tracks):
+                track_list.append({
+                    'recording': track,
+                    'position': str(i+1),
+                })
             release['medium-list'].append({
-                'track-list': [{'recording': track} for track in tracks]
+                'position': '1',
+                'track-list': track_list,
             })
         return release
 
@@ -84,6 +89,48 @@ class MBAlbumInfoTest(unittest.TestCase):
         self.assertEqual(t[1].title, 'TITLE TWO')
         self.assertEqual(t[1].track_id, 'ID TWO')
         self.assertEqual(t[1].length, 200.0)
+
+    def test_parse_track_indices(self):
+        tracks = [self._make_track('TITLE ONE', 'ID ONE', 100.0 * 1000.0),
+                  self._make_track('TITLE TWO', 'ID TWO', 200.0 * 1000.0)]
+        release = self._make_release(tracks=tracks)
+
+        d = mb.album_info(release)
+        t = d.tracks
+        self.assertEqual(t[0].medium_index, 1)
+        self.assertEqual(t[1].medium_index, 2)
+
+    def test_parse_medium_numbers_single_medium(self):
+        tracks = [self._make_track('TITLE ONE', 'ID ONE', 100.0 * 1000.0),
+                  self._make_track('TITLE TWO', 'ID TWO', 200.0 * 1000.0)]
+        release = self._make_release(tracks=tracks)
+
+        d = mb.album_info(release)
+        self.assertEqual(d.mediums, 1)
+        t = d.tracks
+        self.assertEqual(t[0].medium, 1)
+        self.assertEqual(t[1].medium, 1)
+
+    def test_parse_medium_numbers_two_mediums(self):
+        tracks = [self._make_track('TITLE ONE', 'ID ONE', 100.0 * 1000.0),
+                  self._make_track('TITLE TWO', 'ID TWO', 200.0 * 1000.0)]
+        release = self._make_release(tracks=[tracks[0]])
+        second_track_list = [{
+            'recording': tracks[1],
+            'position': '1',
+        }]
+        release['medium-list'].append({
+            'position': '2',
+            'track-list': second_track_list,
+        })
+
+        d = mb.album_info(release)
+        self.assertEqual(d.mediums, 2)
+        t = d.tracks
+        self.assertEqual(t[0].medium, 1)
+        self.assertEqual(t[0].medium_index, 1)
+        self.assertEqual(t[1].medium, 2)
+        self.assertEqual(t[1].medium_index, 1)
 
     def test_parse_release_year_month_only(self):
         release = self._make_release('1987-03')

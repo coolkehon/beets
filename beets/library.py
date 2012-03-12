@@ -68,6 +68,9 @@ ITEM_FIELDS = [
     ('length',      'real', False, True),
     ('bitrate',     'int',  False, True),
     ('format',      'text', False, True),
+    ('samplerate',  'int',  False, True),
+    ('bitdepth',    'int',  False, True),
+    ('channels',    'int',  False, True),
     ('mtime',       'int',  False, False),
 ]
 ITEM_KEYS_WRITABLE = [f[0] for f in ITEM_FIELDS if f[3] and f[2]]
@@ -851,9 +854,12 @@ class Library(BaseLibrary):
             mapping['artist'] = mapping['albumartist']
         if not mapping['albumartist']:
             mapping['albumartist'] = mapping['artist']
+
+        # Get values from plugins.
+        for key, value in plugins.template_values(item).iteritems():
+            mapping[key] = util.sanitize_for_path(value, pathmod, key)
         
         # Perform substitution.
-        mapping.update(plugins.template_values(item))
         funcs = dict(TEMPLATE_FUNCTIONS)
         funcs.update(plugins.template_funcs())
         subpath = subpath_tmpl.substitute(mapping, funcs)
@@ -868,7 +874,7 @@ class Library(BaseLibrary):
         
         # Preserve extension.
         _, extension = pathmod.splitext(item.path)
-        subpath += extension
+        subpath += extension.lower()
         
         if fragment:
             return subpath

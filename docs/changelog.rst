@@ -1,6 +1,69 @@
 Changelog
 =========
 
+1.0b13 (in development)
+-----------------------
+
+Beets 1.0b13 consists of a plethora of small but important fixes and
+refinements. A lyrics plugin is now included with beets; new audio properties
+are catalogged; the autotagger is more tolerant of different tagging styles; and
+importing with original file deletion now cleans up after itself more
+thoroughly. Many, many bugs—including several crashers—were fixed. This release
+lays the foundation for more features to come in the next couple of releases.
+
+* The :doc:`/plugins/lyrics`, originally by `Peter Brunner`_, is revamped and
+  included with beets, making it easy to fetch **song lyrics**.
+* Items now expose their audio **sample rate**, number of **channels**, and
+  **bits per sample** (bitdepth). See :doc:`/reference/pathformat` for a list of
+  all available audio properties. Thanks to Andrew Dunn.
+* The autotagger now tolerates tracks on multi-disc albums that are numbered
+  per-disc. For example, if track 24 on a release is the first track on the
+  second disc, then it is not penalized for having its track number set to 1
+  instead of 24.
+* The autotagger sets the disc number and disc total fields on autotagged
+  albums.
+* The autotagger now also tolerates tracks whose track artists tags are set
+  to "Various Artists".
+* When previewing metadata differences, the importer now shows discrepancies in
+  track length.
+* Importing with ``import_delete`` enabled now cleans up empty directories that
+  contained deleting imported music files.
+* Similarly, ``import_delete`` now causes original album art imported from the
+  disk to be deleted.
+* Plugin-supplied template values, such as those created by ``rewrite``, are now
+  properly sanitized (for example, ``AC/DC`` properly becomes ``AC_DC``).
+* Filename extensions are now always lower-cased when copying and moving files.
+* The ``inline`` plugin now prints a more comprehensible error when exceptions
+  occur in Python snippets.
+* The ``replace`` configuration option can now remove characters entirely (in
+  addition to replacing them) if the special string ``<strip>`` is specified as
+  the replacement.
+* New plugin API: plugins can now add fields to the MediaFile tag abstraction
+  layer. See :ref:`writing-plugins`.
+* A reasonable error message is now shown when the import log file cannot be
+  opened.
+* The import log file is now flushed and closed properly so that it can be used
+  to monitor import progress, even when the import crashes.
+* Duplicate track matches are no longer shown when autotagging singletons.
+* The ``chroma`` plugin now logs errors when fingerprinting fails.
+* The ``lastgenre`` plugin suppresses more errors when dealing with the Last.fm
+  API.
+* Fix a bug in the ``rewrite`` plugin that broke the use of multiple rules for
+  a single field.
+* Fix a crash with non-ASCII characters in bytestring metadata fields (e.g.,
+  MusicBrainz IDs).
+* Fix another crash with non-ASCII characters in the configuration paths.
+* Fix a divide-by-zero crash on zero-length audio files.
+* Fix a crash in the ``chroma`` plugin when the Acoustid database had no
+  recording associated with a fingerprint.
+* Fix a crash when an autotagging with an artist or album containing "AND" or
+  "OR" (upper case).
+* Fix an error in the ``rewrite`` and ``inline`` plugins when the corresponding
+  config sections did not exist.
+* Fix bitrate estimation for AAC files whose headers are missing the relevant
+  data.
+* Fix the ``list`` command in BPD (thanks to Simon Chopin).
+
 1.0b12 (January 16, 2012)
 -------------------------
 

@@ -52,6 +52,10 @@ def acoustid_match(path, metadata=None):
     try:
         res = acoustid.match(API_KEY, path, meta='recordings releases',
                              parse=False)
+    except acoustid.FingerprintGenerationError, exc:
+        log.error('fingerprinting of %s failed: %s' %
+                  (repr(path), str(exc)))
+        return None
     except acoustid.AcoustidError, exc:
         log.debug('fingerprint matching %s failed: %s' % 
                   (repr(path), str(exc)))
@@ -126,3 +130,4 @@ class AcoustidPlugin(plugins.BeetsPlugin):
             return [track]
         else:
             log.debug('no acoustid item candidate found')
+            return []

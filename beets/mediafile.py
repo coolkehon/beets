@@ -114,7 +114,12 @@ def _safe_cast(out_type, val):
         if val is None:
             return u''
         else:
-            return unicode(val)
+            if isinstance(val, str):
+                return val.decode('utf8', 'ignore')
+            elif isinstance(val, unicode):
+                return val
+            else:
+                return unicode(val)
 
     elif out_type == float:
         if val is None:
@@ -450,6 +455,8 @@ class MediaField(object):
                         if self.out_type == bool:
                             # store bools as 1,0 instead of True,False
                             out = unicode(int(out))
+                        elif isinstance(out, str):
+                            out = out.decode('utf8', 'ignore')
                         else:
                             out = unicode(out)
                 elif style.as_type == int:
@@ -937,19 +944,62 @@ class MediaFile(object):
 
     @property
     def length(self):
+        """The duration of the audio in seconds (a float)."""
         return self.mgfile.info.length
 
     @property
+    def samplerate(self):
+        """The audio's sample rate (an int)."""
+        if hasattr(self.mgfile.info, 'sample_rate'):
+            return self.mgfile.info.sample_rate
+        return 0
+    
+    @property
+    def bitdepth(self):
+        """The number of bits per sample in the audio encoding (an int).
+        Only available for certain file formats (zero where
+        unavailable).
+        """
+        if hasattr(self.mgfile.info, 'bits_per_sample'):
+            return self.mgfile.info.bits_per_sample        
+        return 0
+
+    @property
+    def channels(self):
+        """The number of channels in the audio (an int)."""
+        if isinstance(self.mgfile.info, mutagen.mp3.MPEGInfo):
+            return {
+                mutagen.mp3.STEREO: 2,
+                mutagen.mp3.JOINTSTEREO: 2,
+                mutagen.mp3.DUALCHANNEL: 2,
+                mutagen.mp3.MONO: 1,
+            }[self.mgfile.info.mode]
+        if hasattr(self.mgfile.info, 'channels'):
+            return self.mgfile.info.channels
+        return 0
+
+    @property
     def bitrate(self):
-        if hasattr(self.mgfile.info, 'bitrate'):
+        """The number of bits per seconds used in the audio coding (an
+        int). If this is provided explicitly by the compressed file
+        format, this is a precise reflection of the encoding. Otherwise,
+        it is estimated from the on-disk file size. In this case, some
+        imprecision is possible because the file header is incorporated
+        in the file size.
+        """
+        if hasattr(self.mgfile.info, 'bitrate') and self.mgfile.info.bitrate:
             # Many formats provide it explicitly.
             return self.mgfile.info.bitrate
         else:
             # Otherwise, we calculate bitrate from the file size. (This
             # is the case for all of the lossless formats.)
+            if not self.length:
+                # Avoid division by zero if length is not available.
+                return 0
             size = os.path.getsize(self.path)
             return int(size * 8 / self.length)
 
     @property
     def format(self):
+        """A string describing the file format/codec."""
         return TYPES[self.type]

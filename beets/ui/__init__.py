@@ -51,6 +51,7 @@ DEFAULT_PATH_FORMATS = [
 ]
 DEFAULT_ART_FILENAME = 'cover'
 DEFAULT_TIMEOUT = 5.0
+NULL_REPLACE = '<strip>'
 
 # UI exception. Commands should throw this in order to display
 # nonrecoverable errors to the user.
@@ -185,7 +186,7 @@ def input_options(options, require=False, prompt=None, fallback_prompt=None,
                 prompt_part_lengths.append(len(tmpl % str(default)))
             else:
                 prompt_parts.append('# selection')
-                prompt_part_lengths.append(prompt_parts[-1])
+                prompt_part_lengths.append(len(prompt_parts[-1]))
         prompt_parts += capitalized
         prompt_part_lengths += [len(s) for s in options]
 
@@ -296,7 +297,7 @@ def human_bytes(size):
 
 def human_seconds(interval):
     """Formats interval, a number of seconds, as a human-readable time
-    interval.
+    interval using English words.
     """
     units = [
         (1, 'second'),
@@ -319,6 +320,13 @@ def human_seconds(interval):
         interval /= float(increment)
 
     return "%3.1f %ss" % (interval, suffix)
+
+def human_seconds_short(interval):
+    """Formats a number of seconds as a short human-readable M:SS
+    string.
+    """
+    interval = int(interval)
+    return u'%i:%02i' % (interval // 60, interval % 60)
 
 # ANSI terminal colorization code heavily inspired by pygments:
 # http://dev.pocoo.org/hg/pygments-main/file/b2deea5b5030/pygments/console.py
@@ -429,6 +437,8 @@ def _get_replacements(config):
     for index in xrange(0, len(parts), 2):
         pattern = parts[index]
         replacement = parts[index+1]
+        if replacement.lower() == NULL_REPLACE:
+            replacement = ''
         out.append((re.compile(pattern), replacement))
     return out
 
@@ -702,9 +712,9 @@ def main(args=None, configfh=None):
         log.setLevel(logging.DEBUG)
     else:
         log.setLevel(logging.INFO)
-    log.debug(u'config file: %s' % configpath)
-    log.debug(u'library database: %s' % lib.path)
-    log.debug(u'library directory: %s' % lib.directory)
+    log.debug(u'config file: %s' % util.displayable_path(configpath))
+    log.debug(u'library database: %s' % util.displayable_path(lib.path))
+    log.debug(u'library directory: %s' % util.displayable_path(lib.directory))
     
     # Invoke the subcommand.
     try:

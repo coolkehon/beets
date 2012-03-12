@@ -14,7 +14,6 @@
 
 """Tests for non-query database functions of Item.
 """
-import unittest
 import os
 import sqlite3
 import ntpath
@@ -23,9 +22,11 @@ import shutil
 import re
 
 import _common
+from _common import unittest
 from _common import item
 import beets.library
 from beets import util
+from beets import plugins
 
 def lib():
     return beets.library.Library(os.path.join(_common.RSRC, 'test.blb'))
@@ -158,9 +159,16 @@ class DestinationTest(unittest.TestCase):
     def test_destination_preserves_extension(self):
         self.lib.directory = 'base'
         self.lib.path_formats = [('default', '$title')]
-        self.i.path = 'hey.audioFormat'
+        self.i.path = 'hey.audioformat'
         self.assertEqual(self.lib.destination(self.i),
-                         np('base/the title.audioFormat'))
+                         np('base/the title.audioformat'))
+    
+    def test_lower_case_extension(self):
+        self.lib.directory = 'base'
+        self.lib.path_formats = [('default', '$title')]
+        self.i.path = 'hey.MP3'
+        self.assertEqual(self.lib.destination(self.i),
+                         np('base/the title.mp3'))
     
     def test_destination_pads_some_indices(self):
         self.lib.directory = 'base'
@@ -348,6 +356,10 @@ class DestinationTest(unittest.TestCase):
         val = util.sanitize_for_path(12345, posixpath, 'bitrate')
         self.assertEqual(val, u'12kbps')
 
+    def test_component_sanitize_uses_khz_samplerate(self):
+        val = util.sanitize_for_path(12345, posixpath, 'samplerate')
+        self.assertEqual(val, u'12kHz')
+
     def test_artist_falls_back_to_albumartist(self):
         self.i.artist = ''
         self.i.albumartist = 'something'
@@ -404,7 +416,8 @@ class DestinationFunctionTest(unittest.TestCase):
     def _setf(self, fmt):
         self.lib.path_formats.insert(0, ('default', fmt))
     def _assert_dest(self, dest):
-        self.assertEqual(self.lib.destination(self.i), dest)
+        self.assertEqual(self.lib.destination(self.i, pathmod=posixpath),
+                         dest)
 
     def test_upper_case_literal(self):
         self._setf(u'%upper{foo}')
@@ -445,6 +458,47 @@ class DestinationFunctionTest(unittest.TestCase):
     def test_nonexistent_function(self):
         self._setf(u'%foo{bar}')
         self._assert_dest('/base/%foo{bar}')
+
+class PluginDestinationTest(unittest.TestCase):
+    # Mock the plugins.template_values(item) function.
+    def _template_values(self, item):
+        return self._tv_map
+    def setUp(self):
+        self._tv_map = {}
+        self.old_template_values = plugins.template_values
+        plugins.template_values = self._template_values
+
+        self.lib = beets.library.Library(':memory:')
+        self.lib.directory = '/base'
+        self.lib.path_formats = [('default', u'$artist $foo')]
+        self.i = item()
+    def tearDown(self):
+        plugins.template_values = self.old_template_values
+
+    def _assert_dest(self, dest):
+        self.assertEqual(self.lib.destination(self.i, pathmod=posixpath),
+                         '/base/' + dest)
+
+    def test_undefined_value_not_substituted(self):
+        self._assert_dest('the artist $foo')
+    
+    def test_plugin_value_not_substituted(self):
+        self._tv_map = {
+            'foo': 'bar',
+        }
+        self._assert_dest('the artist bar')
+    
+    def test_plugin_value_overrides_attribute(self):
+        self._tv_map = {
+            'artist': 'bar',
+        }
+        self._assert_dest('bar $foo')
+
+    def test_plugin_value_sanitized(self):
+        self._tv_map = {
+            'foo': 'bar/baz',
+        }
+        self._assert_dest('the artist bar_baz')
     
 class MigrationTest(unittest.TestCase):
     """Tests the ability to change the database schema between
@@ -750,7 +804,7 @@ class MtimeTest(unittest.TestCase):
             os.remove(self.ipath)
 
     def _mtime(self):
-        return os.path.getmtime(self.ipath)
+        return int(os.path.getmtime(self.ipath))
 
     def test_mtime_initially_up_to_date(self):
         self.assertGreaterEqual(self.i.mtime, self._mtime())
